@@ -3,7 +3,8 @@
 Rows are compared as multisets (duplicates count), and as ordered lists when the gold query has a top-level
 ORDER BY; columns must come in the same order. A prediction that errors or times out is wrong. Neither
 official script does exactly this: BIRD's compares sets of rows, and Spider's test-suite script drops
-DISTINCT, accepts any column order and compares row order whenever the gold contains "order by" (ADR-013)."""
+DISTINCT, accepts any column order and compares row order whenever the gold contains "order by" (ADR-013).
+Each prediction is also scored with any column order allowed, to show what the strict rule costs."""
 
 import re
 from collections import Counter
@@ -55,6 +56,43 @@ def results_match(gold: list[tuple], pred: list[tuple], ordered: bool) -> bool:
     return gold == pred if ordered else Counter(gold) == Counter(pred)
 
 
+def results_match_any_column_order(gold: list[tuple], pred: list[tuple], ordered: bool) -> bool:
+    """`results_match` with pred's columns allowed in another order: one reordering, applied to every row.
+
+    Each gold column can only take a pred column holding the same values, which usually leaves one choice.
+    Where several fit, identical columns are tried once and a partial reordering is dropped as soon as the
+    columns placed so far disagree with the gold's, so wide results with many alike columns stay fast."""
+    if len(gold) != len(pred) or (gold and len(gold[0]) != len(pred[0])):
+        return False
+    if not gold:
+        return True
+    width = len(gold[0])
+    gold_counts = [Counter(row[i] for row in gold) for i in range(width)]
+    pred_columns = [tuple(row[j] for row in pred) for j in range(width)]
+    pred_counts = [Counter(column) for column in pred_columns]
+    candidates = [[j for j in range(width) if pred_counts[j] == gold_counts[i]] for i in range(width)]
+
+    def extend(order: tuple[int, ...]) -> bool:
+        k = len(order)
+        if k == width:
+            return results_match(gold, [tuple(row[j] for j in order) for row in pred], ordered)
+        tried = set()
+        for j in candidates[k]:
+            if j in order or pred_columns[j] in tried:
+                continue  # a column identical to one already tried here leads to the same rows
+            tried.add(pred_columns[j])
+            placed = (*order, j)
+            if len(candidates[k]) > 1 and not results_match(
+                [row[: k + 1] for row in gold], [tuple(row[c] for c in placed) for row in pred], ordered
+            ):
+                continue
+            if extend(placed):
+                return True
+        return False
+
+    return extend(())
+
+
 def exec_summary(result: ExecResult) -> dict:
     return {
         "ok": result.ok,
@@ -79,13 +117,13 @@ def score_prediction(
     pred_cap = len(gold.rows) if gold_valid else max_rows
     pred = execute_sqlite(db_path, pred_sql, timeout_s, pred_cap) if pred_sql else None
     ordered = has_top_level_order_by(gold_sql)
+    # truncated: more rows than the gold
+    comparable = gold_valid and pred is not None and pred.ok and not pred.truncated
+    correct = comparable and results_match(gold.rows, pred.rows, ordered)
     return {
-        "correct": bool(
-            gold_valid
-            and pred is not None
-            and pred.ok
-            and not pred.truncated  # more rows than the gold
-            and results_match(gold.rows, pred.rows, ordered)
+        "correct": bool(correct),
+        "correct_any_column_order": bool(
+            correct or (comparable and results_match_any_column_order(gold.rows, pred.rows, ordered))
         ),
         "gold_valid": gold_valid,
         "ordered": ordered,

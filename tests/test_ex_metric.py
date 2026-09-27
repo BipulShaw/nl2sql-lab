@@ -3,7 +3,13 @@ from pathlib import Path
 
 import pytest
 
-from nl2sql.eval.ex_metric import has_top_level_order_by, results_match, score_prediction, top_level_text
+from nl2sql.eval.ex_metric import (
+    has_top_level_order_by,
+    results_match,
+    results_match_any_column_order,
+    score_prediction,
+    top_level_text,
+)
 
 
 @pytest.mark.parametrize(
@@ -48,6 +54,44 @@ def test_column_order_matters() -> None:
     assert not results_match([(1, "a")], [("a", 1)], ordered=False)
 
 
+def test_any_column_order_accepts_swapped_columns() -> None:
+    gold = [(1, "a"), (2, "b")]
+
+    assert results_match_any_column_order(gold, [("b", 2), ("a", 1)], ordered=False)
+    assert results_match_any_column_order(gold, [("a", 1), ("b", 2)], ordered=True)
+    assert not results_match_any_column_order(
+        gold, [("b", 2), ("a", 1)], ordered=True
+    )  # row order still counts
+
+
+def test_any_column_order_needs_one_order_for_every_row() -> None:
+    # sorting the values inside each row would call these equal; no single column order does
+    assert not results_match_any_column_order([(1, 2), (3, 4)], [(2, 1), (3, 4)], ordered=False)
+
+
+def test_any_column_order_handles_columns_with_the_same_values() -> None:
+    assert results_match_any_column_order(
+        [(1, 1, "x"), (2, 2, "y")], [("x", 1, 1), ("y", 2, 2)], ordered=False
+    )
+    assert results_match_any_column_order([(1, 2), (2, 1)], [(2, 1), (1, 2)], ordered=True)
+
+
+def test_any_column_order_tries_identical_columns_once() -> None:
+    # ten all-NULL columns could be ordered 10! ways; they are interchangeable, so one order is tried
+    gold = [(None,) * 10 + (1, "a"), (None,) * 10 + (2, "b")]
+    right = [("a", 1, *(None,) * 10), ("b", 2, *(None,) * 10)]
+    wrong = [("b", 1, *(None,) * 10), ("a", 2, *(None,) * 10)]
+
+    assert results_match_any_column_order(gold, right, ordered=False)
+    assert not results_match_any_column_order(gold, wrong, ordered=False)
+
+
+def test_any_column_order_still_needs_the_same_shape() -> None:
+    assert not results_match_any_column_order([(1,)], [(1, 1)], ordered=False)
+    assert not results_match_any_column_order([(1,)], [(1,), (1,)], ordered=False)
+    assert results_match_any_column_order([], [], ordered=False)
+
+
 @pytest.fixture
 def db(tmp_path: Path) -> str:
     path = tmp_path / "t.sqlite"
@@ -71,6 +115,12 @@ def test_score_equivalent_query_is_correct(db: str) -> None:
     result = score_prediction(db, "SELECT a FROM t WHERE b = 'y'", "SELECT a FROM t WHERE a >= 2", 5, 100)
 
     assert result["correct"]
+
+
+def test_score_swapped_columns_count_only_under_any_column_order(db: str) -> None:
+    result = score_prediction(db, "SELECT a, b FROM t", "SELECT b, a FROM t", 5, 100)
+
+    assert not result["correct"] and result["correct_any_column_order"]
 
 
 def test_score_wrong_order_is_wrong_when_gold_is_ordered(db: str) -> None:

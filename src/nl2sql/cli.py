@@ -93,7 +93,10 @@ def eval_command(
     )
     metrics, counts = manifest["metrics"], manifest["counts"]
     console.print(f"[bold]{manifest['run_id']}[/bold]")
-    console.print(f"EX {metrics['ex']:.4f}  (valid gold {metrics['ex_valid_gold']:.4f})  n={manifest['n']}")
+    console.print(
+        f"EX {metrics['ex']:.4f}  (valid gold {metrics['ex_valid_gold']:.4f}, "
+        f"any column order {metrics['ex_any_column_order']:.4f})  n={manifest['n']}"
+    )
     console.print({k: v for k, v in counts.items() if v})
 
 

@@ -221,6 +221,8 @@ def metrics(records: list[dict]) -> dict:
     return {
         "ex": ratio(sum(r["correct"] for r in records), n),  # failing or over-cap gold counts as wrong
         "ex_valid_gold": ratio(sum(r["correct"] for r in valid_gold), len(valid_gold)),
+        # secondary: the columns may come in any order, as Spider's official evaluator allows (ADR-013)
+        "ex_any_column_order": ratio(sum(r["correct_any_column_order"] for r in records), n),
         "ex_by_difficulty": by_difficulty or None,
         "parse_valid_rate": ratio(sum(r["pred_parses"] for r in records), n),
         "exec_error_rate": ratio(sum(bool(r["pred_exec"]) and not r["pred_exec"]["ok"] for r in records), n),
@@ -241,6 +243,7 @@ def counts(records: list[dict]) -> dict:
 
     return {
         "correct": sum(r["correct"] for r in records),
+        "correct_any_column_order": sum(r["correct_any_column_order"] for r in records),
         "gold_errors": sum(not r["gold_exec"]["ok"] for r in records),
         "gold_timeouts": sum(r["gold_exec"]["timed_out"] for r in records),
         "no_sql": sum(r["status"] == "no_sql" for r in records),
