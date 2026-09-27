@@ -1,7 +1,8 @@
 # Decisions
 
-Short ADRs: context → decision → alternatives → consequence. Newest last. Where an ADR changes PLAN.md, the ADR
-wins and says so.
+Short ADRs: context → decision → alternatives → consequence. Newest last. PLAN.md (cited as "PLAN §n") is the
+author's private working plan and isn't in this repo; each ADR states the context it needs. Where an ADR changes
+the plan, the ADR wins and says so.
 
 ---
 

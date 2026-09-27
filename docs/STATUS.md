@@ -1,6 +1,6 @@
 # Status
 
-**Current phase:** Phase 0 (environment) is done, except that CI needs a GitHub remote. Next: Phase 1 (baseline 9B).
+**Current phase:** Phase 0 (environment) is done. Next: Phase 1 (baseline 9B).
 **Last updated:** 2026-09-27
 
 ---
@@ -78,7 +78,8 @@ rough figure.
 - [x] Model ids and licenses in `DECISIONS.md`
 - [x] `git init`, `.gitignore`, first commit
 - [x] GitHub Actions workflow (`ruff` + `pytest` on CPU, `uv sync --locked` without the `ml` extra)
-- [ ] **CI green:** needs a GitHub repository to push to (waiting on Bipul)
+- [x] CI green on https://github.com/BipulShaw/nl2sql-lab
+  ([first run](https://github.com/BipulShaw/nl2sql-lab/actions/runs/36339586023))
 
 ## Next: Phase 1 (baseline 9B)
 - Download Spider and BIRD. BIRD's training databases are large, so check the size and ask before downloading
@@ -93,5 +94,5 @@ rough figure.
 - Ollama was started by hand (`ollama serve`) for these tests. If the Ollama tray app isn't running, the harness
   should fail fast with a clear message.
 - Hub downloads are unauthenticated (rate-limited). Setting `HF_TOKEN` is optional.
-- The Windows global git identity is a work address. This repo uses a repo-local identity (personal email).
+- Commits use a repo-local identity (a GitHub noreply address), not the machine's global git config.
 - The DeltaNet kernels' effect on training throughput is unmeasured until Phase 3's 30-step check.
