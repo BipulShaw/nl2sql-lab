@@ -1,0 +1,19 @@
+# Python / tooling
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Large, reproducible artifacts (datasets, weights, HF cache if HF_HOME points here)
+data/
+models/
+.cache/
+results/runs/*/predictions.jsonl
+
+# Local secrets
+.env
+
+# Personal context (working plan, notes about the author): stays local, never pushed.
+PLAN.md
+CLAUDE.local.md

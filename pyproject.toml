@@ -1,0 +1,74 @@
+[project]
+name = "nl2sql-lab"
+version = "0.0.1"
+description = "Text-to-SQL pipeline, QLoRA fine-tune and evaluation harness on Spider and BIRD."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "matplotlib",
+    "openai",
+    "pandas",
+    "psycopg[binary]",
+    "pydantic>=2",
+    "pydantic-settings",
+    "pyyaml",
+    "rich",
+    "sqlglot",
+    "sse-starlette",
+    "typer",
+    "uvicorn",
+]
+
+[project.optional-dependencies]
+# GPU stack for WSL2/Linux + CUDA. CI installs the project without this extra.
+ml = [
+    "accelerate>=1.15",
+    "bitsandbytes>=0.50",
+    "datasets>=5",
+    "einops",  # imported by the flash-linear-attention Hub kernel (Gated DeltaNet)
+    "kernels>=0.16,<0.17",  # transformers 5.17 rejects 0.17+ and silently disables Hub kernels
+    "liger-kernel>=0.8.3",
+    "peft>=0.21",
+    "sentence-transformers>=6",
+    "torch>=2.14",
+    "torchvision",
+    "transformers>=5.17",
+    "trl>=1.14",
+]
+
+[project.scripts]
+nl2sql = "nl2sql.cli:app"
+
+[dependency-groups]
+dev = ["pytest", "ruff"]
+
+[build-system]
+requires = ["uv_build>=0.12,<0.13"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "nl2sql"
+
+[tool.uv]
+# The project runs on WSL2 Ubuntu and ubuntu CI runners only.
+environments = ["sys_platform == 'linux'"]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu130", extra = "ml" }]
+torchvision = [{ index = "pytorch-cu130", extra = "ml" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
