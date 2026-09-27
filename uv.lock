@@ -1510,6 +1510,7 @@ version = "0.0.1"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "matplotlib" },
     { name = "openai" },
     { name = "pandas" },
@@ -1553,6 +1554,7 @@ requires-dist = [
     { name = "datasets", marker = "extra == 'ml'", specifier = ">=5" },
     { name = "einops", marker = "extra == 'ml'" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "kernels", marker = "extra == 'ml'", specifier = ">=0.16,<0.17" },
     { name = "liger-kernel", marker = "extra == 'ml'", specifier = ">=0.8.3" },
     { name = "matplotlib" },

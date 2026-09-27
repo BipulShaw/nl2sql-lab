@@ -5,11 +5,12 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
-# Large, reproducible artifacts (datasets, weights, HF cache if HF_HOME points here)
-data/
-models/
-.cache/
-results/runs/*/predictions.jsonl
+# Large, reproducible artifacts (datasets, weights, HF cache if HF_HOME points here).
+# Anchored with a leading slash: a bare `data/` also matches the src/nl2sql/data/ package.
+/data/
+/models/
+/.cache/
+/results/runs/*/predictions.jsonl
 
 # Local secrets
 .env

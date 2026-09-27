@@ -1,0 +1,138 @@
+"""Ollama's native /api/chat with thinking off, checking on every call that the model read the whole prompt.
+
+Ollama cuts an over-long prompt to fit num_ctx and reports no error (the probe sent 15,921 tokens; 4,098 were
+read). So the client counts the prompt with the model's own tokenizer before sending, refuses prompts that
+cannot fit, and requires the server's prompt_eval_count to equal its own count afterwards (ADR-012)."""
+
+import time
+from collections.abc import Callable
+from dataclasses import asdict
+
+import httpx
+
+from nl2sql.llm.base import Generation
+from nl2sql.llm.cache import ResponseCache, cache_key
+
+
+class PromptTooLongError(ValueError):
+    """Prompt plus reply budget does not fit the context window; nothing was sent."""
+
+
+class PromptCountMismatchError(RuntimeError):
+    """The server read a different number of prompt tokens than the client counted: truncation, or a chat
+    template that differs from the tokenizer's. Either way the run's prompts are not what we think."""
+
+
+class OllamaLLM:
+    backend = "ollama"
+
+    def __init__(
+        self,
+        model: str,
+        count_chat_tokens: Callable[[list[dict[str, str]]], int],
+        base_url: str = "http://localhost:11434",
+        num_ctx: int = 8192,
+        max_new_tokens: int = 256,
+        seed: int = 42,
+        cache: ResponseCache | None = None,
+        timeout_s: float = 600.0,
+        retries: int = 3,
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
+        self.model = model
+        self.count_chat_tokens = count_chat_tokens
+        self.num_ctx, self.max_new_tokens, self.seed = num_ctx, max_new_tokens, seed
+        self.cache, self.retries = cache, retries
+        self.http = httpx.Client(base_url=base_url, timeout=timeout_s, transport=transport)
+        self.info = self.describe()  # fails fast if the server is down or the model is not pulled
+
+    def options(self) -> dict:
+        # temperature 0 = greedy; presence_penalty 0 overrides the model's Modelfile default (ADR-007)
+        return {
+            "num_ctx": self.num_ctx,
+            "num_predict": self.max_new_tokens,
+            "temperature": 0,
+            "presence_penalty": 0,
+            "seed": self.seed,
+        }
+
+    def describe(self) -> dict:
+        version = self.http.get("/api/version").json()["version"]
+        models = self.http.get("/api/tags").json()["models"]
+        entry = next((m for m in models if m["name"].lower() == self.model.lower()), None)
+        if entry is None:
+            raise RuntimeError(f"{self.model!r} is not pulled in Ollama; run: ollama pull {self.model}")
+        details = entry.get("details") or {}
+        return {
+            "backend": self.backend,
+            "ollama_version": version,
+            "model": self.model,
+            "digest": entry["digest"],
+            "quantization": details.get("quantization_level"),
+            "parameter_size": details.get("parameter_size"),
+            "options": self.options(),
+            "think": False,
+        }
+
+    def generate(self, messages: list[dict[str, str]]) -> Generation:
+        prompt_tokens = self.count_chat_tokens(messages)
+        if prompt_tokens + self.max_new_tokens > self.num_ctx:
+            raise PromptTooLongError(
+                f"{prompt_tokens} prompt + {self.max_new_tokens} new > num_ctx {self.num_ctx}"
+            )
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+            "think": False,
+            "options": self.options(),
+        }
+        key = cache_key(
+            backend=self.backend,
+            digest=self.info["digest"],
+            quantization=self.info["quantization"],
+            adapter=None,
+            payload=payload,
+        )
+        if self.cache is not None and (hit := self.cache.get(key)) is not None:
+            return Generation(**hit, cached=True)
+
+        start = time.perf_counter()
+        data = self.post_chat(payload)
+        latency_ms = (time.perf_counter() - start) * 1000
+        if data.get("prompt_eval_count") != prompt_tokens:
+            raise PromptCountMismatchError(
+                f"client counted {prompt_tokens} prompt tokens, server read {data.get('prompt_eval_count')}"
+            )
+        message = data["message"]
+        if message.get("thinking"):
+            raise RuntimeError("the model returned a thinking block although think=false was sent")
+        generation = Generation(
+            text=message.get("content", ""),
+            prompt_tokens=prompt_tokens,
+            output_tokens=data.get("eval_count", 0),
+            latency_ms=latency_ms,
+            finish_reason=data.get("done_reason", "stop"),
+        )
+        if self.cache is not None:
+            self.cache.put(key, {k: v for k, v in asdict(generation).items() if k != "cached"})
+        return generation
+
+    def post_chat(self, payload: dict) -> dict:
+        """POST with retries and backoff on connection errors and 5xx; 4xx fails at once."""
+        error = ""
+        for attempt in range(self.retries + 1):
+            try:
+                response = self.http.post("/api/chat", json=payload)
+                if response.status_code < 500:
+                    response.raise_for_status()
+                    return response.json()
+                error = f"HTTP {response.status_code}: {response.text[:300]}"
+            except httpx.TransportError as exc:
+                error = f"{type(exc).__name__}: {exc}"
+            if attempt < self.retries:
+                time.sleep(2**attempt)
+        raise RuntimeError(f"Ollama /api/chat failed {self.retries + 1} times; last error: {error}")
+
+    def close(self) -> None:
+        self.http.close()

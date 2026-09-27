@@ -1,0 +1,16 @@
+# Zero-shot reference: the local 9B through Ollama, full schema, no linking, no repair (PLAN Phase 1).
+model_id: qwen3.5:9B
+backend: ollama
+base_url: http://localhost:11434
+quantization: Q4_K_M            # must match what Ollama reports for model_id; checked at run start
+context_window: 8192            # sent as num_ctx on every call (ADR-007)
+thinking: false
+# Qwen3.5-4B and -9B ship identical tokenizer and chat-template files, so the pinned 4B counts for both (ADR-012).
+tokenizer: {id: Qwen/Qwen3.5-4B, revision: 851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a}
+linking: {enabled: false}
+prompt: {schema_token_budget: 3072, max_total_tokens: 4096, include_samples: true}
+decoding: {max_new_tokens: 256, greedy: true}
+repair: {max_repairs: 0}
+guard: {enabled: false, dialect: sqlite, inject_limit: false}
+exec: {timeout_s: 30, max_rows: 1000000}   # row cap on the gold result (ADR-013)
+seed: 42
