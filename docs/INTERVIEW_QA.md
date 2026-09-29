@@ -75,7 +75,6 @@ without those examples. The harness is checked by scoring the gold SQL as the pr
 No. Reading through the misses found gold queries that are wrong. For example, Spider dev 554 looks for
 `first_name = 'timmothy'`, while the data has 'Timmothy'. The gold returns nothing, the model's correctly cased
 query finds the student, and EX marks the model wrong. The 200-example pilot had at least four such case
-mismatches. I don't
-patch the gold, because then my numbers would stop being comparable with anyone else's. Instead, a failure
-breakdown script sorts the misses: wrong row counts, wrong values, column order, extra columns. That way I can
-say where points go rather than quoting one number.
+mismatches. I don't patch the gold, because then my numbers would stop being comparable with anyone else's.
+Instead, a failure breakdown script sorts the misses: wrong row counts, wrong values, column order, extra
+columns. That way I can say where points go rather than quoting one number.

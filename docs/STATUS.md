@@ -79,20 +79,11 @@ rough figure.
 - [x] `git init`, `.gitignore`, first commit
 - [x] GitHub Actions workflow (`ruff` + `pytest` on CPU, `uv sync --locked` without the `ml` extra)
 - [x] CI green on https://github.com/BipulShaw/nl2sql-lab
-  ([first run](https://github.com/BipulShaw/nl2sql-lab/actions/runs/36339586023))
-
-## Next: Phase 1 (baseline 9B)
-- Download Spider and BIRD. BIRD's training databases are large, so check the size and ask before downloading
-  anything over 5 GB.
-- Implement the dataset loaders, schema serializer, prompt builder, `OllamaLLM` backend (with the `num_ctx`
-  assertion), EX metric, harness and run manifest, with tests. Also the gold-passthrough test.
-- First results: 9B zero-shot on Spider dev and BIRD mini-dev.
-- ADR-004 check: base 4B zero-shot on BIRD mini-dev in nf4 and in int8 (int8 is ~3× slower to decode, so budget
-  for it).
+  ([runs](https://github.com/BipulShaw/nl2sql-lab/actions/workflows/ci.yml))
 
 ## Open problems / notes
-- Ollama was started by hand (`ollama serve`) for these tests. If the Ollama tray app isn't running, the harness
-  should fail fast with a clear message.
+- A run fails at startup, before any example, if Ollama isn't reachable or the model isn't pulled
+  (`OllamaLLM.describe`).
 - Hub downloads are unauthenticated (rate-limited). Setting `HF_TOKEN` is optional.
 - Commits use a repo-local identity (a GitHub noreply address), not the machine's global git config.
 - The DeltaNet kernels' effect on training throughput is unmeasured until Phase 3's 30-step check.
