@@ -116,9 +116,101 @@ Written as interview prep, so each number is either measured on this machine or 
   wrong, with no error anywhere.
 - Our defenses:
   - Send `num_ctx: 8192` on every request.
-  - Assert `prompt_tokens < num_ctx` on every response.
+  - ~~Assert `prompt_tokens < num_ctx` on every response.~~ Phase 1 showed this check can never fire; see
+    "Context windows and truncation" below (ADR-012).
 - The model's shipped sampling defaults are `temperature 1` and `presence_penalty 1.5`:
   - Presence penalty discourages reusing tokens already in the text. That's bad for SQL, which legitimately
     repeats column and table names.
   - For eval we send `temperature 0` (greedy, deterministic) and `presence_penalty 0`.
-- **Where:** `scripts/smoke_ollama.py`; later `src/nl2sql/llm/openai_compat.py`.
+- **Where:** `scripts/smoke_ollama.py`; `src/nl2sql/llm/ollama.py` (`OllamaLLM.options`).
+
+---
+
+## Phase 1
+
+### Execution accuracy (EX) vs exact match
+- There are two ways to grade generated SQL:
+  - **Exact match** compares the SQL text, clause by clause. A correct query written differently fails: a JOIN
+    instead of a subquery, or `COUNT(id)` instead of `COUNT(*)`.
+  - **Execution accuracy (EX)** runs both the gold and the predicted query on the database and compares the
+    results. Any query that returns the right answer passes. It's the headline metric of both Spider and BIRD.
+- EX has **false positives**. A wrong query can return the right rows by coincidence on this particular data. The
+  unit tests have one: on rows (1,'x'), (2,'y'), (3,'y'), `WHERE a >= 2` and `WHERE b = 'y'` return the same
+  rows. Spider's "test-suite" accuracy runs each query on many generated databases to catch these. We use the one
+  official database, as BIRD does.
+- EX has **false negatives** when the gold is wrong. Some pilot examples:
+  - Spider dev 554: the gold looks for `first_name = 'timmothy'`, but the data says 'Timmothy'. The gold returns
+    0 rows, the model's correctly cased query returns the student, and the model is marked wrong.
+  - Spider dev 387, 583 and 786 fail the same way.
+- **"Compare the results" hides decisions**, and each one moves the score (ADR-013):
+  - Multiset or set? Duplicates count for us but not for BIRD.
+  - Does row order count? Only under a top-level `ORDER BY`.
+  - Must columns come in the gold's order? For us yes; Spider's evaluator allows any order.
+  - In the 9B pilot, column order alone cost 5 points (75.0% vs 80.0%).
+- **Where:** `src/nl2sql/eval/ex_metric.py`; `scripts/failure_breakdown.py` sorts the misses by kind.
+
+### Greedy decoding, and why eval answers are cached
+- At each step the model produces a score for every token in its vocabulary (248,320 here), and decoding picks
+  one:
+  - **Sampling** draws at random. Temperature reshapes the odds: logits are divided by T, so T < 1 sharpens them
+    and T > 1 flattens them. `top_p` and `top_k` cut off the unlikely tail.
+  - **Greedy** (temperature 0) always takes the single most likely token. The same prompt gives the same output,
+    in principle.
+- For eval we use greedy. One run is enough: no averaging over samples. Models compare on equal terms, and every
+  failure can be looked at again.
+- "In principle": a GPU may add floating-point numbers in a different order from one run to the next (batch
+  size, kernel choice). That can flip a near-tie between two tokens, and from then on the outputs differ.
+- That's one reason for the **response cache** (`data/cache/llm_responses.sqlite`):
+  - The key is a hash of the backend, the model digest, the quantization, the adapter and the full request.
+  - A rerun reuses the recorded answer instead of hoping for the same one. So a fixed or added metric re-scores
+    old answers exactly, at no GPU cost. The any-column-order metric was added that way.
+- Greedy's failure mode is the **repetition loop**, where the likeliest next token keeps restarting the same
+  phrase. `max_new_tokens` (256) bounds it, and the manifest counts replies that hit the limit (`finish_length`):
+  0 of 200 in the pilot. Replies averaged 39 tokens.
+- `seed 42` is still sent. At temperature 0 it changes nothing, but it costs nothing and is recorded.
+- **Where:** `OllamaLLM.options()` in `src/nl2sql/llm/ollama.py`; `src/nl2sql/llm/cache.py`.
+
+### Context windows and truncation: the "747" experiment
+- The **context window** is how many tokens the model attends to at once: the prompt plus everything it
+  generates. Qwen3.5 supports 262,144. The server allocates only `num_ctx` (8,192 here), because the memory for
+  the window is reserved at load time (next entry).
+- **What happens when a prompt doesn't fit**, measured by `scripts/probe_ollama_context.py`:
+  - The probe sent 1,000 numbered lines (15,921 tokens) with `num_ctx` 8,192 and asked for the number of the first
+    line.
+  - No error came back. Ollama reported reading 4,098 tokens.
+  - The model answered "747". It had only seen part of the prompt, not its start.
+- In our prompts the schema comes first. A truncated prompt means SQL written against tables the model never saw,
+  and still no error.
+- **Why the obvious check fails:** the server reports the count of what it *kept*. That's 4,098, under 8,192, so
+  `prompt_tokens < num_ctx` passes exactly when truncation happened.
+- **What works:** count the prompt yourself with the same tokenizer and chat template, and require the server's
+  count to equal yours (ADR-012). This relies on the two counts agreeing whenever nothing is cut. The probe showed
+  they do: 1,520 = 1,520, even when Ollama reused cached prefix tokens.
+- Analogy: MySQL in non-strict mode cuts a string that is too long for a `VARCHAR(255)` column and raises only a
+  warning. The insert succeeds and the data is wrong. Only comparing lengths yourself catches it.
+- **Where:** `scripts/probe_ollama_context.py`; `src/nl2sql/llm/ollama.py`; `src/nl2sql/llm/tokens.py`.
+
+### KV cache: what `num_ctx` costs in VRAM
+- In attention, each new token looks at the **keys and values** of every earlier token. Recomputing them at every
+  step would redo all the past work, so the server stores them: the **KV cache**. It grows linearly with the
+  context window and is reserved when the model loads.
+- Size per token = 2 (K and V) × attention layers × KV heads × head dim × bytes per number.
+- The Qwen3.5-9B numbers, from Ollama's model metadata (`/api/show`):
+  - 32 layers, but only every 4th is full attention, so 8 layers keep a KV cache.
+  - 4 KV heads. This is grouped-query attention: 16 query heads share 4 sets of keys and values.
+  - Head dim 256. Numbers are f16, 2 bytes each (Ollama's default cache type).
+- 2 × 8 × 4 × 256 × 2 bytes = **32 KiB per token**:
+
+  | Context | KV cache |
+  |---|---|
+  | 8,192 (`num_ctx`) | 256 MiB |
+  | 262,144 (the model's maximum) | 8 GiB, more than the whole card |
+  | 8,192, if all 32 layers were standard attention | 1 GiB |
+
+- The other 24 layers are Gated DeltaNet (Phase 0 entry). Each keeps a fixed-size state instead: 32 value heads ×
+  a 128 × 128 matrix, 524,288 numbers per layer, about 2 MiB in fp32. That doesn't grow with the context.
+- Measured while the eval runs: Ollama puts the loaded 9B at 5.24 GiB of VRAM at `num_ctx` 8,192, covering
+  weights, KV cache and compute buffers. The card shows 6.85 of 8.0 GiB used, desktop included.
+- This is why Ollama picks a small default `num_ctx`. For most models, where every layer keeps a KV cache, a long
+  window costs gigabytes.
+- **Where:** `context_window` in `configs/*.yaml`; Ollama `/api/show` (architecture) and `/api/ps` (VRAM).

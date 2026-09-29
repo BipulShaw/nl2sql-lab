@@ -93,6 +93,10 @@ quantization differences than usual. bf16 LoRA on the 4B needs about 10 GB, whic
 
 **Consequence.** Phase 1 costs one extra mini-dev run. The Phase 3 setup is decided by data, not by assumption.
 
+*Update 2026-09-29 (Phase 1):* nf4 and int8 are bitsandbytes formats, so the check needs the transformers
+backend (`HFLocalLLM`), which the plan builds in Phase 3. The check moves to the start of Phase 3, before any
+training. Phase 1 evaluates the base 4B through Ollama (Q4_K_M) instead.
+
 ## ADR-005 — Drop the 9B fine-tune stretch goal
 *2026-09-27, Phase 0; amends PLAN §1 role 3 and §7*
 
@@ -140,7 +144,8 @@ build.
 - `seed 42`
 - thinking off
 
-The client asserts `prompt_tokens < num_ctx` on every response.
+The client asserts `prompt_tokens < num_ctx` on every response. *(Superseded by ADR-012: a truncated prompt
+reports a count below `num_ctx`, so this check can never fail. The client now requires an exact match.)*
 
 These go through Ollama's **native `/api/chat`**, not the OpenAI-compatible `/v1`. Measured by
 `scripts/smoke_ollama.py` on Ollama 0.34.0:
@@ -293,3 +298,169 @@ invisible to the repo, and I haven't confirmed it applies to WSL processes.
 - The plan's "if you hit OOM" fallbacks (PLAN §7) now actually trigger.
 - The fraction lives in config, so a different card can change it.
 - CUDA context and non-PyTorch allocations sit outside the cap, which is why it's 0.85 and not 0.9.
+
+## ADR-012 — Detect prompt truncation with an exact token count, not `prompt_tokens < num_ctx`
+*2026-09-28, Phase 1; amends ADR-007*
+
+**Context.** `scripts/probe_ollama_context.py` measured how Ollama 0.34.0 counts and cuts prompts (`qwen3.5:9B`,
+native `/api/chat`, thinking off, `num_ctx` 8192):
+
+| Prompt | Ollama `prompt_eval_count` | Our count (HF tokenizer + chat template) |
+|---|---|---|
+| 100 numbered lines, first call | 1,520 | 1,520 |
+| Same prompt again (KV cache reused) | 1,520 | 1,520 |
+| Same prefix, new suffix | 1,523 | 1,523 |
+| 1,000 numbered lines | **4,098** | **15,921** |
+
+- The over-length prompt raised no error. The model was asked for the number of the first line and answered
+  "747" (the truth is 1): it never saw the start of the prompt.
+- The reported count, 4,098, is below `num_ctx`. So ADR-007's check `prompt_tokens < num_ctx` passes exactly when
+  truncation has happened. It can never fire.
+- Encouraging: the count is exact otherwise, including when Ollama reuses cached prefix tokens.
+
+**Decision.**
+- The client counts every prompt itself, with the served model's tokenizer and chat template (thinking off, no
+  extra special tokens). The 9B's `tokenizer.json` and `chat_template.jinja` are byte-identical to the 4B's, so
+  the pinned `Qwen/Qwen3.5-4B` revision counts for both (`src/nl2sql/llm/tokens.py`).
+- **Before sending:** if prompt + `max_new_tokens` exceeds `num_ctx`, raise `PromptTooLongError` and send
+  nothing. The harness first applies the config's tighter `prompt.max_total_tokens`; such an example is recorded
+  as `prompt_too_long` and counts as wrong.
+- **After the response:** `prompt_eval_count` must equal the client's count, or `PromptCountMismatchError`
+  stops the run. This catches truncation, and also a re-pointed model tag whose template differs from our
+  tokenizer's.
+
+**Alternatives.**
+- Keep the `<` check: it cannot detect truncation (above).
+- Set a much larger `num_ctx`: costs VRAM and still detects nothing.
+
+**Consequence.**
+- A run that finishes has had every prompt read in full. There is no silent-truncation state.
+- Each config names a tokenizer and revision that must match the served model. For a model outside the Qwen3.5
+  family, the first call fails loudly until the config names the right tokenizer.
+
+## ADR-013 — What EX means here, and how it differs from the official evaluators
+*2026-09-28, Phase 1; amends PLAN §6.6 (row cap) and the wording of PLAN §6.9*
+
+**Context.**
+- The plan's metric: execute gold and predicted SQL, and compare rows as multisets. Compare them as ordered lists
+  when the gold has a top-level `ORDER BY`. An error or timeout is wrong. The plan calls this "BIRD-style strict".
+- The official scripts do something else:
+  - **BIRD** (`evaluation.py`) compares `set(predicted) == set(gold)`. Duplicates and row order never count,
+    even under `ORDER BY`.
+  - **Spider's test-suite evaluator** (`exec_eval.py`) accepts the predicted columns in any order. It compares
+    row order whenever the gold contains "order by" anywhere, including in a subquery. By default it removes
+    `DISTINCT` from both queries before running them. Its timeout is 60 s.
+- The plan's executor capped fetched rows at 10,000. Two truncated results can look equal when they aren't. At
+  that cap, 27 distinct gold queries would have been cut:
+  - 6 in Spider train, 2 in Spider dev (455, 456);
+  - 19 in BIRD dev. Three of these (340, 346, 397) are also in mini-dev, which reuses BIRD dev's question ids.
+
+**Decision.**
+- **EX** (headline):
+  - Row tuples are compared as a multiset (`collections.Counter`), or as an ordered list if the gold's outermost
+    query has an `ORDER BY`. This is decided with sqlglot, with a scan outside parentheses and quotes for the few
+    gold queries sqlglot cannot parse.
+  - Columns must come in the gold's order.
+  - `DISTINCT` is kept.
+  - Values compare as Python values, so `1 == 1.0`.
+- **Row cap:**
+  - The gold result is capped at 1,000,000 rows. The largest gold result in any split is 278,230 rows (BIRD dev).
+  - The prediction is fetched only up to the gold's row count + 1. More rows than the gold is wrong, and a
+    runaway query never loads.
+- **Unscoreable gold:** a gold query that fails, times out (30 s) or exceeds the cap makes its example wrong in
+  EX. **EX (valid gold)** leaves those examples out. Both are reported.
+- **EX (any col. order)** is reported as a secondary number. The prediction may reorder its columns, one
+  reordering applied to every row, as Spider's evaluator allows. It shows what the strict column rule costs.
+- The plan's "BIRD-style" label is dropped. BIRD's rule is set equality, which is more lenient. The README and
+  `RESULTS.md` define EX explicitly.
+- Running the official scripts on the final predictions, for leaderboard parity, is optional in Phase 4.
+
+**Alternatives.**
+- Set equality (BIRD's rule): it would score a query that returns duplicate rows where the question wants
+  distinct ones as correct.
+- Any column order as the headline: defensible, since column order is usually arbitrary. The plan specified the
+  strict rule, though, and reporting both keeps the difference visible.
+
+**Consequence.**
+- On the 9B pilot (200 Spider dev examples), 10 of 50 misses were column order alone: 75.0% strict, 80.0% with
+  any column order (`scripts/failure_breakdown.py`).
+- Our numbers are not directly comparable with published leaderboard numbers, and the docs say so.
+
+## ADR-014 — Benchmark data: pinned archives and verified gold SQL
+*2026-09-28, Phase 1*
+
+**Context.**
+- Spider 1.0 comes from a Google Drive link on its website. BIRD comes from its official bucket.
+- A changed upstream file would silently change the benchmark.
+- Gold SQL is not guaranteed to run.
+
+**Decision.**
+- `scripts/download_data.sh` checks every archive against a pinned SHA-256. A mismatch stops the script.
+
+  | Archive | SHA-256 |
+  |---|---|
+  | `spider_data.zip` | `00636695dabed6b5f4b8328a16b13e069a2f16591d5efcce57660669c85b121b` |
+  | BIRD `dev.zip` (unpacks to `dev_20240627/`) | `cdd6d19faeb45a23970b98d3ef6c40a87987c95459c2cf12076897a60cf5a630` |
+  | BIRD `minidev.zip` (SQLite version used) | `cc48ba16838204e4e214512030cb572eeb5f7bcdd999bae4b9b6ff12ec13b92f` |
+
+- BIRD train (8.9 GB) is opt-in (`--with-bird-train`) and not yet downloaded. It is only needed for Phase 3
+  training data.
+- `nl2sql data verify` runs every gold query with EX's own timeout and row cap. It writes the ones that cannot be
+  scored to `data/gold_failures.json`.
+
+**Evidence** (`nl2sql data verify`, 74 s):
+
+| Split | Examples | Databases | Gold errors | of which timeouts | Over the 1M cap | Largest gold result |
+|---|---|---|---|---|---|---|
+| Spider train | 8,659 | 146 | 3 | 0 | 0 | 18,228 rows |
+| Spider dev | 1,034 | 20 | 0 | 0 | 0 | 20,662 rows |
+| BIRD dev | 1,534 | 11 | 2 | 2 | 0 | 278,230 rows |
+| BIRD mini-dev | 500 | 11 | 2 | 2 | 0 | 29,936 rows |
+
+- Spider train 3153 references a table that does not exist (`Ref_Company_Types`). Spider train 4513 and 4514 put
+  `ORDER BY` before `INTERSECT`, which SQLite rejects.
+- BIRD dev 518 took about 50 s when run alone, and 701 about 300 s. Both are over the 30 s timeout. The same two
+  questions are in mini-dev.
+
+**Consequence.**
+- Best possible EX: 100% on Spider dev, 1532/1534 on BIRD dev, 498/500 on mini-dev.
+- The three broken Spider train queries must be left out of Phase 3's training data.
+- The harness sanity check (gold SQL scored as the prediction) gives EX 100.0% on Spider dev.
+
+## ADR-015 — Schema serialization and token budgets
+*2026-09-28, Phase 1*
+
+**Context.**
+- The plan's prompt shows the schema as DDL-style text within a token budget. The default is 1,536 schema tokens
+  in 2,048 total, the training length. A full-schema, no-linking run may use up to 3,072.
+- `scripts/schema_token_stats.py` measured the schemas with the pinned tokenizer.
+  - Spider dev: median 517 tokens at full detail, and the largest is 1,904 (`dog_kennels`).
+  - BIRD dev: median 2,691, and the largest is 7,612.
+
+**Decision.**
+- **Format:**
+  - `CREATE TABLE` text with primary keys inline, or as a separate line for a composite key.
+  - Foreign keys as `-- FK: a.x -> b.y` lines.
+  - An aligned `--` comment per column, `description | e.g. <samples>`.
+  - Sample values are written as SQL literals, so the model sees how to quote them and their exact case and
+    date format.
+  - Identifiers are backtick-quoted only when they need it (reserved words, spaces).
+- **Samples:** 3 distinct non-null values from the first 1,000 rows, each at most 30 characters.
+- **Descriptions** (BIRD's CSV files) are capped at 200 characters, and the boilerplate "commonsense evidence:" is
+  removed. Some value descriptions run past 800 characters, while the 95th percentile is ~170.
+- **Shedding order when over budget:** `full` → `no_samples` → `no_descriptions`. With a schema linker (Phase 2),
+  two more levels follow: `keys_only_unselected` → `selected_only`. The first level that fits is used, and the
+  manifest records it for every example.
+- **9B zero-shot config:** schema budget 3,072 and 4,096 tokens in total (the plan's full-schema setting).
+
+**Evidence.** Prompt tokens plus 256 new tokens, at schema budget 3,072:
+- **Spider dev:** every database fits at full detail. Median total 972, 95th percentile 2,258, max 2,279.
+- **BIRD dev:**
+  - Databases: 6 at full detail, 3 without samples, 2 without descriptions.
+  - Max total 3,132, so nothing exceeds 4,096.
+- **BIRD dev at budget 6,144:** 409 examples would exceed 4,096 in total.
+
+**Consequence.**
+- The Spider baseline sees every schema complete.
+- On BIRD, 5 of 11 databases lose samples or descriptions at this budget. At the 1,536 training budget, BIRD needs
+  schema linking.
