@@ -1,0 +1,124 @@
+{
+  "run_id": "20260929-103921_spider-dev_base_4b_local_n200",
+  "mode": "model",
+  "dataset": "spider",
+  "split": "dev",
+  "n": 200,
+  "n_split": 1034,
+  "sample": {
+    "limit": 200,
+    "seed": 42,
+    "method": "stratified"
+  },
+  "config_name": "base_4b_local",
+  "backend": "ollama",
+  "model": "qwen3.5:4b",
+  "model_digest": "2a654d98e6fba55d452b7043684e9b57a947e393bbffa62485a7aac05ee4eefd",
+  "quantization": "Q4_K_M",
+  "adapter": null,
+  "thinking": false,
+  "server": {
+    "backend": "ollama",
+    "ollama_version": "0.34.0",
+    "model": "qwen3.5:4b",
+    "digest": "2a654d98e6fba55d452b7043684e9b57a947e393bbffa62485a7aac05ee4eefd",
+    "quantization": "Q4_K_M",
+    "parameter_size": "4.7B",
+    "options": {
+      "num_ctx": 8192,
+      "num_predict": 256,
+      "temperature": 0,
+      "presence_penalty": 0,
+      "seed": 42
+    },
+    "think": false
+  },
+  "config": {
+    "name": "base_4b_local",
+    "model_id": "qwen3.5:4b",
+    "backend": "ollama",
+    "base_url": "http://localhost:11434",
+    "quantization": "Q4_K_M",
+    "context_window": 8192,
+    "thinking": false,
+    "tokenizer": {
+      "id": "Qwen/Qwen3.5-4B",
+      "revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
+    },
+    "linking": {
+      "enabled": false
+    },
+    "prompt": {
+      "schema_token_budget": 3072,
+      "max_total_tokens": 4096,
+      "include_samples": true
+    },
+    "decoding": {
+      "max_new_tokens": 256,
+      "greedy": true
+    },
+    "repair": {
+      "max_repairs": 0
+    },
+    "guard": {
+      "enabled": false,
+      "dialect": "sqlite",
+      "inject_limit": false
+    },
+    "exec": {
+      "timeout_s": 30.0,
+      "max_rows": 1000000
+    },
+    "seed": 42
+  },
+  "exec": {
+    "timeout_s": 30.0,
+    "max_rows": 1000000
+  },
+  "git": {
+    "commit": "b2ec0ac9ea5a6e8963ab4a41eb13bacdc00c129c",
+    "tree": "b8dc1750031bdcfbb37327816434b42ad74dbde1",
+    "dirty": false
+  },
+  "started_at": "2026-09-29T10:39:21+00:00",
+  "ended_at": "2026-09-29T10:42:43+00:00",
+  "duration_s": 201.8,
+  "metrics": {
+    "ex": 0.72,
+    "ex_valid_gold": 0.72,
+    "ex_any_column_order": 0.76,
+    "ex_by_difficulty": null,
+    "parse_valid_rate": 1.0,
+    "exec_error_rate": 0.015,
+    "guard_block_rate": null,
+    "repair_rate": null,
+    "repair_success_rate": null,
+    "link_recall": null,
+    "p50_latency_ms": 830.2,
+    "tokens_in": 171750,
+    "tokens_out": 7824,
+    "api_cost_usd": 0.0
+  },
+  "counts": {
+    "correct": 144,
+    "correct_any_column_order": 152,
+    "gold_errors": 0,
+    "gold_timeouts": 0,
+    "no_sql": 0,
+    "prompt_too_long": 0,
+    "pred_errors": 3,
+    "pred_timeouts": 0,
+    "gold_over_row_cap": 0,
+    "pred_more_rows_than_gold": 17,
+    "ordered_comparisons": 43,
+    "think_leaks": 0,
+    "finish_length": 0,
+    "cache_hits": 0,
+    "schema_levels": {
+      "full": 200
+    },
+    "sql_source": {
+      "fence": 200
+    }
+  }
+}

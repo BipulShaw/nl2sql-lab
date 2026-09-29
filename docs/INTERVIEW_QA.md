@@ -78,3 +78,15 @@ query finds the student, and EX marks the model wrong. The 200-example pilot had
 mismatches. I don't patch the gold, because then my numbers would stop being comparable with anyone else's.
 Instead, a failure breakdown script sorts the misses: wrong row counts, wrong values, column order, extra
 columns. That way I can say where points go rather than quoting one number.
+
+**Q: What did the baseline show?**
+Both models ran zero-shot on all 1,034 Spider dev questions, through Ollama at Q4_K_M with identical prompts.
+The 9B scored 74.3% EX and the 4B 73.4%, and that gap isn't significant. The models disagree on 119 questions,
+split 64–55, and McNemar's exact test gives p = 0.46. The 200-question pilots had suggested 3 points, which is
+why I treat a pilot as a smoke test, not a measurement. Where the points go says more than the headline. About
+a quarter of the misses return different values and a third return the wrong number of rows. Column order alone
+costs the 9B 4.9 points, which Spider's official evaluator wouldn't count. Only 10 of the 9B's misses fail to
+execute, so an execution-repair loop has little to work with on Spider. For fine-tuning, this means two things.
+The before-and-after comparison has to be on BIRD, whose schemas are about five times larger. And it has to run
+the base and fine-tuned 4B through the same backend and quantization. Otherwise I'd be measuring Ollama's
+Q4_K_M against nf4 in transformers, not the effect of training.

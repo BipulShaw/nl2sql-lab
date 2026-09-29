@@ -17,6 +17,9 @@ seed in the manifest).
 | Date | Data | n | Model | Quant | Linking | Repairs | EX | EX (valid gold) | EX (any col. order) | p50 ms | Run |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | 2026-09-27 | spider dev | 200/1034 | `qwen3.5:9B` | Q4_K_M | off | 0 | **75.0** | 75.0 | – | 1172 | `20260927-195159_spider-dev_base_9b_local_n200` |
+| 2026-09-29 | spider dev | 1034/1034 | `qwen3.5:9B` | Q4_K_M | off | 0 | **74.3** | 74.3 | 79.2 | 1256 | `20260929-102401_spider-dev_base_9b_local_n1034` |
+| 2026-09-29 | spider dev | 200/1034 | `qwen3.5:4b` | Q4_K_M | off | 0 | **72.0** | 72.0 | 76.0 | 830 | `20260929-103921_spider-dev_base_4b_local_n200` |
+| 2026-09-29 | spider dev | 1034/1034 | `qwen3.5:4b` | Q4_K_M | off | 0 | **73.4** | 73.4 | 77.5 | 810 | `20260929-104302_spider-dev_base_4b_local_n1034` |
 
 ## Harness sanity check: gold SQL scored as the prediction
 

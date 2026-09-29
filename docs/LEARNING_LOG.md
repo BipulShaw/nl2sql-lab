@@ -167,6 +167,10 @@ Written as interview prep, so each number is either measured on this machine or 
 - Greedy's failure mode is the **repetition loop**, where the likeliest next token keeps restarting the same
   phrase. `max_new_tokens` (256) bounds it, and the manifest counts replies that hit the limit (`finish_length`):
   0 of 200 in the pilot. Replies averaged 39 tokens.
+  - The full 4B run hit one (Spider dev 766, "people living in nations that do not use English"). Its `WHERE`
+    clause cycles through `OR cl.Language IS NULL AND cl.IsOfficial IS NULL`, `OR cl.Language != 'English'
+    AND ...` and the like, repeating the same few lines until the 256 tokens run out. The SQL is cut off
+    mid-clause, so SQLite rejects it ("incomplete input") and it counts as wrong.
 - `seed 42` is still sent. At temperature 0 it changes nothing, but it costs nothing and is recorded.
 - **Where:** `OllamaLLM.options()` in `src/nl2sql/llm/ollama.py`; `src/nl2sql/llm/cache.py`.
 
@@ -214,3 +218,23 @@ Written as interview prep, so each number is either measured on this machine or 
 - This is why Ollama picks a small default `num_ctx`. For most models, where every layer keeps a KV cache, a long
   window costs gigabytes.
 - **Where:** `context_window` in `configs/*.yaml`; Ollama `/api/show` (architecture) and `/api/ps` (VRAM).
+
+### Is a one-point gap real? Paired comparison and McNemar's test
+- On the same 1,034 Spider dev questions the 9B scored 74.3% and the 4B 73.4%. Is the 9B better, or is
+  0.9 points noise?
+- **The data is paired.** Both models answered the same questions, and most questions are easy for both or hard
+  for both: 704 both right, 211 both wrong. Those 915 say nothing about which model is better. Only the 119
+  disagreements do: the 9B alone right on 64, the 4B alone on 55.
+- **McNemar's test** asks: if the models were equally good, each disagreement would be a coin flip, so how likely
+  is a split at least as uneven as 64–55? The binomial distribution answers exactly: p = 0.46. A split like
+  that happens by chance about half the time, so it's no evidence either way.
+- **How big a gap would count?** With 119 disagreements, 71–48 (a gap of 23 examples, 2.2 points) gives
+  p = 0.043, while 70–49 gives p = 0.066.
+- **A pilot is a smoke test, not a measurement.** The 200-example pilots showed 75.0% vs 72.0% (13–7
+  disagreements, p = 0.26). On the full split the gap shrank to 0.9 points.
+- **Why not compare two confidence intervals?** Treating the scores as independent samples ignores the pairing.
+  Here that gives a standard error of about 1.9 points for the difference, against about 1.1 for the paired
+  comparison, because the question-to-question variation that the pairing cancels is counted in.
+- What it changes: Spider dev can't tell these two models apart, so it can't show a fine-tune closing the gap
+  either. Phase 3's comparison rests on BIRD, and each model comparison reports the paired p-value.
+- **Where:** `src/nl2sql/eval/paired.py`; `uv run nl2sql results compare <run A> <run B>`.
