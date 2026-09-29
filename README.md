@@ -27,6 +27,7 @@ uv run nl2sql eval --dataset spider --split dev --gold          # sanity check: 
 uv run --extra ml nl2sql eval --dataset spider --split dev --config configs/base_9b_local.yaml [--limit 200]
 uv run nl2sql results table               # regenerate results/RESULTS.md from the run manifests
 uv run python scripts/failure_breakdown.py results/runs/<run_id>   # sort a run's misses by kind
+uv run nl2sql results compare results/runs/<run_a> results/runs/<run_b>   # paired comparison, McNemar's p
 ```
 
 Each run writes `results/runs/<run_id>/manifest.json`: the config, the model digest, the git commit, the

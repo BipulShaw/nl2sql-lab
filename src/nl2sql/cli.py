@@ -106,3 +106,19 @@ def results_table() -> None:
     from nl2sql.eval.results import write_results
 
     console.print(f"wrote {write_results()}")
+
+
+@results_app.command("compare")
+def results_compare(run_a: Path, run_b: Path) -> None:
+    """Compare two runs of the same examples: who got what right, and McNemar's p for the EX gap."""
+    from nl2sql.eval.paired import compare_runs
+
+    r = compare_runs(run_a, run_b)
+    table = Table("", "count")
+    for label, key in (("both right", "both"), ("only A right", "only_a"), ("only B right", "only_b")):
+        table.add_row(label, str(r[key]))
+    table.add_row("both wrong", str(r["neither"]))
+    console.print(f"A: {run_a.name}\nB: {run_b.name}")
+    console.print(table)
+    gap = 100 * (r["only_a"] - r["only_b"]) / r["n"]
+    console.print(f"EX(A) - EX(B) = {gap:+.1f} points, McNemar exact p = {r['p_value']:.3f}  (n={r['n']})")
