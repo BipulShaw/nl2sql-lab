@@ -290,6 +290,9 @@ def counts(records: list[dict]) -> dict:
         "ordered_comparisons": sum(r["ordered"] for r in records),
         "think_leaks": sum(r.get("think_leak", False) for r in records),
         "finish_length": sum(a["finish_reason"] == "length" for a in attempts),
+        "finish_incomplete": sum(
+            a["finish_reason"] == "incomplete" for a in attempts
+        ),  # ended by Ollama (ADR-019)
         "cache_hits": sum(a["cached"] for a in attempts),
         "pipeline_failures": dict(Counter(r["failure"] for r in records if r.get("failure"))),
         "repaired": sum(bool(r.get("repairs")) for r in records),

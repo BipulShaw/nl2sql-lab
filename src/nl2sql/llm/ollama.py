@@ -4,7 +4,8 @@ Ollama cuts an over-long prompt to fit num_ctx and reports no error (the probe s
 read). So the client counts the prompt with the model's own tokenizer before sending, refuses prompts that
 cannot fit, and requires the server's prompt_eval_count to equal its own count afterwards (ADR-012).
 
-A reply Ollama did not finish (no `done`, no prompt_eval_count) is retried like a server error (ADR-019)."""
+A reply Ollama did not finish (no `done`, no prompt_eval_count) is retried like a server error; one that stays
+unfinished is kept as an incomplete reply, like one cut off at max_new_tokens (ADR-019)."""
 
 import logging
 import time
@@ -106,28 +107,35 @@ class OllamaLLM:
         start = time.perf_counter()
         data = self.post_chat(payload)
         latency_ms = (time.perf_counter() - start) * 1000
-        if data.get("prompt_eval_count") != prompt_tokens:
-            raise PromptCountMismatchError(
-                f"client counted {prompt_tokens} prompt tokens, server read {data.get('prompt_eval_count')}"
-            )
         message = data["message"]
         if message.get("thinking"):
             raise RuntimeError("the model returned a thinking block although think=false was sent")
-        generation = Generation(
-            text=message.get("content", ""),
-            prompt_tokens=prompt_tokens,
-            output_tokens=data.get("eval_count", 0),
-            latency_ms=latency_ms,
-            finish_reason=data.get("done_reason", "stop"),
-        )
+        if data.get("done") is not True:
+            # Ollama ended the reply early on every attempt, with no counts (ADR-019). Kept like a reply cut
+            # off at max_new_tokens: the SQL it holds is scored. Output tokens are unknown, recorded as 0.
+            generation = Generation(message.get("content", ""), prompt_tokens, 0, latency_ms, "incomplete")
+        elif data.get("prompt_eval_count") != prompt_tokens:
+            raise PromptCountMismatchError(
+                f"client counted {prompt_tokens} prompt tokens, server read {data.get('prompt_eval_count')}"
+            )
+        else:
+            generation = Generation(
+                text=message.get("content", ""),
+                prompt_tokens=prompt_tokens,
+                output_tokens=data.get("eval_count", 0),
+                latency_ms=latency_ms,
+                finish_reason=data.get("done_reason", "stop"),
+            )
         if self.cache is not None:
             self.cache.put(key, {k: v for k, v in asdict(generation).items() if k != "cached"})
         return generation
 
     def post_chat(self, payload: dict) -> dict:
-        """POST, retrying with backoff on connection errors, 5xx and unfinished replies; 4xx fails at once."""
+        """POST, retrying with backoff on connection errors, 5xx and unfinished replies; 4xx fails at once. A
+        reply still unfinished after the last attempt is returned as it is."""
         error = ""
         for attempt in range(self.retries + 1):
+            unfinished = None
             try:
                 response = self.http.post("/api/chat", json=payload)
                 if response.status_code < 500:
@@ -137,6 +145,7 @@ class OllamaLLM:
                         return data
                     # Seen with the 4B: llama-server stopped partway through the prompt and Ollama still
                     # answered 200, without the counts (ADR-019).
+                    unfinished = data
                     error = f"unfinished reply: done={data.get('done')!r}, fields {sorted(data)}"
                 else:
                     error = f"HTTP {response.status_code}: {response.text[:300]}"
@@ -145,6 +154,11 @@ class OllamaLLM:
             if attempt < self.retries:
                 logger.warning("Ollama /api/chat attempt %d failed, retrying: %s", attempt + 1, error)
                 time.sleep(self.backoff_s * 2**attempt)
+        if unfinished is not None and "message" in unfinished:
+            logger.warning(
+                "Ollama /api/chat: still unfinished after %d attempts, kept as incomplete", attempt + 1
+            )
+            return unfinished
         raise RuntimeError(f"Ollama /api/chat failed {self.retries + 1} times; last error: {error}")
 
     def close(self) -> None:

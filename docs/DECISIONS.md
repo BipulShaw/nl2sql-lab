@@ -677,29 +677,42 @@ native `/api/chat`, thinking off, `num_ctx` 8192):
 - Results for the linked and repair configs record per-attempt detail (`attempts[]`) in `predictions.jsonl`,
   so any failure can be traced to its turn.
 
-## ADR-019 — Retry replies Ollama didn't finish
+## ADR-019 — Replies Ollama doesn't finish: retry, then keep as incomplete
 *2026-09-30, Phase 2; extends ADR-012*
 
 **Context.**
-- Two calls failed while the base 4B ran on BIRD mini-dev (long prompts, ~2,000–2,900 tokens). In both, Ollama's
-  log shows llama-server stopping at the same step: it had processed all but the last 4 prompt tokens and never
-  logged a prompt-eval time.
-  - **First:** the request hung for 14 min 51 s and then returned HTTP 500. The client's retry got a normal reply
-    in 0.9 s. The run then stalled until the session's time limit stopped it; the cause of that stall isn't known.
-  - **Second, on rerunning the split:** Ollama returned **HTTP 200** after 2.1 s and then cancelled the task. The
-    reply had no `prompt_eval_count`, so ADR-012's check stopped the run with "server read None".
-- ADR-012's check exists to catch truncation, which shows up as a count that differs from the client's. A missing
-  count isn't truncation. It's a reply the server never finished.
+- Two failures stopped the base 4B's run on BIRD mini-dev.
+  - **A hang:** one request (2,828-token prompt) hung inside llama-server for 14 min 51 s and then returned
+    HTTP 500. The client's retry got a normal reply in 0.9 s. The run then stalled until the session's time
+    limit stopped it; the cause of that stall isn't known.
+  - **A reply cut off, every time:** on bird-mini-dev-1078 ("Which player is older, Aaron Lennon or Abdelaziz
+    Barrada?"), the model starts a normal query and then degenerates into a run of zeros:
+    `JOIN Player p2 ON p2.player_api_id = '10000000000000000000000000000000…`
+    - After about 112 generated tokens, Ollama ends the reply with HTTP 200 and `done: false`. It sends no
+      prompt or output counts and no error, then cancels the task.
+    - This happened on 5 attempts out of 5, one of them a streamed replay, so it's deterministic.
+- Before this change, the first failure killed the run through a 500 that outlasted the retries, or a stall. The
+  second killed it through ADR-012's check ("server read None"). That check exists to catch truncated prompts,
+  which show up as a count that differs from the client's. A missing count isn't that. It's a reply the server
+  never finished.
 
 **Decision.**
 - A 200 reply without `done: true` or without `prompt_eval_count` counts as a failed call. It's retried with
-  backoff (1, 2, 4 s) like a 5xx or a dropped connection. The run stops only after 4 failed attempts.
-- Every retry is logged as a warning, so it shows in the run's log.
-- A reply that reports a count different from the client's still stops the run at once (ADR-012).
+  backoff (1, 2, 4 s) like a 5xx or a dropped connection, and every retry is logged as a warning.
+- **If it's still unfinished after the last attempt, it's kept as an incomplete reply**
+  (`finish_reason: "incomplete"`), just like a reply cut off at `max_new_tokens`:
+  - Its text is scored, so a broken query counts as wrong.
+  - A repair config gets its repair turn.
+  - Its output tokens are unknown and recorded as 0.
+  - `counts.finish_incomplete` reports how many there were.
+- **Still fatal:**
+  - a finished reply whose count differs from the client's (ADR-012);
+  - a 5xx or connection error that persists through every retry.
 - The read timeout drops from 600 s to 300 s. A 256-token reply takes seconds, and a cold 9B load under a minute.
-- Retrying can't change results: decoding is greedy with a fixed seed, and only a finished reply is cached or
-  scored.
+- Retrying can't change results: decoding is greedy with a fixed seed. Incomplete replies are cached like any
+  other, so a rerun reproduces them.
 
 **Consequence.**
-- Ablation runs 1–7 ran at commit `42dbc46` and runs 8–12 at the commit with this change. The two differ only
-  in how failed calls are handled; each manifest records its commit.
+- Ablation runs 1–7 ran at commit `42dbc46`, and runs 8–12 at the commit with this change. The change only
+  affects how failed calls are handled. Runs 1–7 can't have met an unfinished reply, since under the old code
+  one would have stopped the run, and all seven finished. Each manifest records its commit.

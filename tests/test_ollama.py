@@ -28,7 +28,8 @@ class FakeOllama:
             )
         self.chats.append(json.loads(request.content))
         if len(self.chats) <= self.unfinished:
-            return httpx.Response(200, json={"message": {"role": "assistant", "content": ""}, "done": False})
+            partial = {"role": "assistant", "content": "```sql\nSELECT '1000000"}
+            return httpx.Response(200, json={"message": partial, "done": False})
         message = {"role": "assistant", "content": "```sql\nSELECT 1\n```", "thinking": self.thinking}
         body = {
             "message": message,
@@ -99,12 +100,13 @@ def test_a_reply_ollama_did_not_finish_is_retried() -> None:
     assert len(server.chats) == 3 and generation.prompt_tokens == 10
 
 
-def test_unfinished_replies_that_persist_fail_loudly() -> None:
+def test_a_reply_that_stays_unfinished_is_kept_as_incomplete() -> None:
     server = FakeOllama(prompt_eval_count=10, unfinished=99)
 
-    with pytest.raises(RuntimeError, match="unfinished reply"):
-        make_llm(server, 10, retries=2, backoff_s=0).generate(MESSAGES)
+    generation = make_llm(server, 10, retries=2, backoff_s=0).generate(MESSAGES)
+
     assert len(server.chats) == 3
+    assert generation.finish_reason == "incomplete" and generation.text == "```sql\nSELECT '1000000"
 
 
 def test_unknown_model_fails_at_construction() -> None:
