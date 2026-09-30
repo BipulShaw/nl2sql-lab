@@ -676,3 +676,30 @@ native `/api/chat`, thinking off, `num_ctx` 8192):
   answers failed to run.
 - Results for the linked and repair configs record per-attempt detail (`attempts[]`) in `predictions.jsonl`,
   so any failure can be traced to its turn.
+
+## ADR-019 — Retry replies Ollama didn't finish
+*2026-09-30, Phase 2; extends ADR-012*
+
+**Context.**
+- Two calls failed while the base 4B ran on BIRD mini-dev (long prompts, ~2,000–2,900 tokens). In both, Ollama's
+  log shows llama-server stopping at the same step: it had processed all but the last 4 prompt tokens and never
+  logged a prompt-eval time.
+  - **First:** the request hung for 14 min 51 s and then returned HTTP 500. The client's retry got a normal reply
+    in 0.9 s. The run then stalled until the session's time limit stopped it; the cause of that stall isn't known.
+  - **Second, on rerunning the split:** Ollama returned **HTTP 200** after 2.1 s and then cancelled the task. The
+    reply had no `prompt_eval_count`, so ADR-012's check stopped the run with "server read None".
+- ADR-012's check exists to catch truncation, which shows up as a count that differs from the client's. A missing
+  count isn't truncation. It's a reply the server never finished.
+
+**Decision.**
+- A 200 reply without `done: true` or without `prompt_eval_count` counts as a failed call. It's retried with
+  backoff (1, 2, 4 s) like a 5xx or a dropped connection. The run stops only after 4 failed attempts.
+- Every retry is logged as a warning, so it shows in the run's log.
+- A reply that reports a count different from the client's still stops the run at once (ADR-012).
+- The read timeout drops from 600 s to 300 s. A 256-token reply takes seconds, and a cold 9B load under a minute.
+- Retrying can't change results: decoding is greedy with a fixed seed, and only a finished reply is cached or
+  scored.
+
+**Consequence.**
+- Ablation runs 1–7 ran at commit `42dbc46` and runs 8–12 at the commit with this change. The two differ only
+  in how failed calls are handled; each manifest records its commit.

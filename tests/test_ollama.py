@@ -13,8 +13,9 @@ MESSAGES = [{"role": "user", "content": "How many singers?"}]
 class FakeOllama:
     """Answers /api/version, /api/tags and /api/chat the way Ollama does, and records chat payloads."""
 
-    def __init__(self, prompt_eval_count: int, thinking: str = "") -> None:
+    def __init__(self, prompt_eval_count: int, thinking: str = "", unfinished: int = 0) -> None:
         self.prompt_eval_count, self.thinking = prompt_eval_count, thinking
+        self.unfinished = unfinished  # the first this many chats get a 200 without done or counts
         self.chats: list[dict] = []
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
@@ -26,12 +27,15 @@ class FakeOllama:
                 200, json={"models": [{"name": "qwen3.5:9b", "digest": "abc", "details": details}]}
             )
         self.chats.append(json.loads(request.content))
+        if len(self.chats) <= self.unfinished:
+            return httpx.Response(200, json={"message": {"role": "assistant", "content": ""}, "done": False})
         message = {"role": "assistant", "content": "```sql\nSELECT 1\n```", "thinking": self.thinking}
         body = {
             "message": message,
+            "done": True,
+            "done_reason": "stop",
             "prompt_eval_count": self.prompt_eval_count,
             "eval_count": 9,
-            "done_reason": "stop",
         }
         return httpx.Response(200, json=body)
 
@@ -85,6 +89,22 @@ def test_cache_serves_repeat_requests(tmp_path: Path) -> None:
 
     assert len(server.chats) == 1
     assert not first.cached and second.cached and second.text == first.text
+
+
+def test_a_reply_ollama_did_not_finish_is_retried() -> None:
+    server = FakeOllama(prompt_eval_count=10, unfinished=2)
+
+    generation = make_llm(server, 10, backoff_s=0).generate(MESSAGES)
+
+    assert len(server.chats) == 3 and generation.prompt_tokens == 10
+
+
+def test_unfinished_replies_that_persist_fail_loudly() -> None:
+    server = FakeOllama(prompt_eval_count=10, unfinished=99)
+
+    with pytest.raises(RuntimeError, match="unfinished reply"):
+        make_llm(server, 10, retries=2, backoff_s=0).generate(MESSAGES)
+    assert len(server.chats) == 3
 
 
 def test_unknown_model_fails_at_construction() -> None:

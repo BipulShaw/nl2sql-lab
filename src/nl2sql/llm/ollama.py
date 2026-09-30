@@ -2,8 +2,11 @@
 
 Ollama cuts an over-long prompt to fit num_ctx and reports no error (the probe sent 15,921 tokens; 4,098 were
 read). So the client counts the prompt with the model's own tokenizer before sending, refuses prompts that
-cannot fit, and requires the server's prompt_eval_count to equal its own count afterwards (ADR-012)."""
+cannot fit, and requires the server's prompt_eval_count to equal its own count afterwards (ADR-012).
 
+A reply Ollama did not finish (no `done`, no prompt_eval_count) is retried like a server error (ADR-019)."""
+
+import logging
 import time
 from collections.abc import Callable
 from dataclasses import asdict
@@ -12,6 +15,8 @@ import httpx
 
 from nl2sql.llm.base import Generation
 from nl2sql.llm.cache import ResponseCache, cache_key
+
+logger = logging.getLogger(__name__)
 
 
 class PromptTooLongError(ValueError):
@@ -35,14 +40,15 @@ class OllamaLLM:
         max_new_tokens: int = 256,
         seed: int = 42,
         cache: ResponseCache | None = None,
-        timeout_s: float = 600.0,
+        timeout_s: float = 300.0,  # per read; a 256-token reply takes seconds, a cold 9B load under a minute
         retries: int = 3,
+        backoff_s: float = 1.0,  # before retry n (from 0): backoff_s * 2**n
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.model = model
         self.count_chat_tokens = count_chat_tokens
         self.num_ctx, self.max_new_tokens, self.seed = num_ctx, max_new_tokens, seed
-        self.cache, self.retries = cache, retries
+        self.cache, self.retries, self.backoff_s = cache, retries, backoff_s
         self.http = httpx.Client(base_url=base_url, timeout=timeout_s, transport=transport)
         self.info = self.describe()  # fails fast if the server is down or the model is not pulled
 
@@ -119,19 +125,26 @@ class OllamaLLM:
         return generation
 
     def post_chat(self, payload: dict) -> dict:
-        """POST with retries and backoff on connection errors and 5xx; 4xx fails at once."""
+        """POST, retrying with backoff on connection errors, 5xx and unfinished replies; 4xx fails at once."""
         error = ""
         for attempt in range(self.retries + 1):
             try:
                 response = self.http.post("/api/chat", json=payload)
                 if response.status_code < 500:
                     response.raise_for_status()
-                    return response.json()
-                error = f"HTTP {response.status_code}: {response.text[:300]}"
+                    data = response.json()
+                    if data.get("done") is True and "prompt_eval_count" in data:
+                        return data
+                    # Seen with the 4B: llama-server stopped partway through the prompt and Ollama still
+                    # answered 200, without the counts (ADR-019).
+                    error = f"unfinished reply: done={data.get('done')!r}, fields {sorted(data)}"
+                else:
+                    error = f"HTTP {response.status_code}: {response.text[:300]}"
             except httpx.TransportError as exc:
                 error = f"{type(exc).__name__}: {exc}"
             if attempt < self.retries:
-                time.sleep(2**attempt)
+                logger.warning("Ollama /api/chat attempt %d failed, retrying: %s", attempt + 1, error)
+                time.sleep(self.backoff_s * 2**attempt)
         raise RuntimeError(f"Ollama /api/chat failed {self.retries + 1} times; last error: {error}")
 
     def close(self) -> None:
