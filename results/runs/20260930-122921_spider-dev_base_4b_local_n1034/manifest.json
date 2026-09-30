@@ -1,0 +1,135 @@
+{
+  "run_id": "20260930-122921_spider-dev_base_4b_local_n1034",
+  "mode": "model",
+  "dataset": "spider",
+  "split": "dev",
+  "n": 1034,
+  "n_split": 1034,
+  "sample": null,
+  "config_name": "base_4b_local",
+  "backend": "ollama",
+  "model": "qwen3.5:4b",
+  "model_digest": "2a654d98e6fba55d452b7043684e9b57a947e393bbffa62485a7aac05ee4eefd",
+  "quantization": "Q4_K_M",
+  "adapter": null,
+  "thinking": false,
+  "server": {
+    "backend": "ollama",
+    "ollama_version": "0.34.0",
+    "model": "qwen3.5:4b",
+    "digest": "2a654d98e6fba55d452b7043684e9b57a947e393bbffa62485a7aac05ee4eefd",
+    "quantization": "Q4_K_M",
+    "parameter_size": "4.7B",
+    "options": {
+      "num_ctx": 8192,
+      "num_predict": 256,
+      "temperature": 0,
+      "presence_penalty": 0,
+      "seed": 42
+    },
+    "think": false
+  },
+  "config": {
+    "name": "base_4b_local",
+    "model_id": "qwen3.5:4b",
+    "backend": "ollama",
+    "base_url": "http://localhost:11434",
+    "quantization": "Q4_K_M",
+    "context_window": 8192,
+    "thinking": false,
+    "tokenizer": {
+      "id": "Qwen/Qwen3.5-4B",
+      "revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
+    },
+    "linking": {
+      "enabled": false,
+      "top_k": 4,
+      "all_tables_up_to": 6,
+      "fk_hops": 1,
+      "lexical_bonus": 0.1,
+      "query_instruction": true,
+      "embed_model": "BAAI/bge-small-en-v1.5",
+      "embed_revision": "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
+    },
+    "prompt": {
+      "schema_token_budget": 3072,
+      "max_total_tokens": 4096,
+      "include_samples": true
+    },
+    "decoding": {
+      "max_new_tokens": 256,
+      "greedy": true
+    },
+    "repair": {
+      "max_repairs": 0,
+      "on_empty_result": false
+    },
+    "guard": {
+      "enabled": false,
+      "dialect": "sqlite",
+      "inject_limit": false
+    },
+    "exec": {
+      "timeout_s": 30.0,
+      "max_rows": 1000000
+    },
+    "seed": 42
+  },
+  "exec": {
+    "timeout_s": 30.0,
+    "max_rows": 1000000
+  },
+  "git": {
+    "commit": "42dbc46181bcb9ce5b8f41e26a944ea79ef94e9c",
+    "tree": "30c1dbe6e626c057d7934b160c3061b08d5f41a4",
+    "dirty": false
+  },
+  "started_at": "2026-09-30T12:29:21+00:00",
+  "ended_at": "2026-09-30T12:29:34+00:00",
+  "duration_s": 12.8,
+  "latency_scope": "pipeline",
+  "metrics": {
+    "ex": 0.734,
+    "ex_valid_gold": 0.734,
+    "ex_any_column_order": 0.7747,
+    "ex_by_difficulty": null,
+    "parse_valid_rate": 0.999,
+    "exec_error_rate": 0.0203,
+    "guard_block_rate": null,
+    "repair_rate": null,
+    "repair_success_rate": null,
+    "link_recall": null,
+    "p50_latency_ms": 812.0,
+    "tokens_in": 886977,
+    "tokens_out": 40129,
+    "api_cost_usd": 0.0
+  },
+  "counts": {
+    "correct": 759,
+    "correct_any_column_order": 801,
+    "gold_errors": 0,
+    "gold_timeouts": 0,
+    "no_sql": 0,
+    "prompt_too_long": 0,
+    "pred_errors": 21,
+    "pred_timeouts": 0,
+    "gold_over_row_cap": 0,
+    "pred_more_rows_than_gold": 51,
+    "ordered_comparisons": 231,
+    "think_leaks": 0,
+    "finish_length": 1,
+    "cache_hits": 1034,
+    "pipeline_failures": {
+      "exec_error": 21
+    },
+    "repaired": 0,
+    "repaired_correct": 0,
+    "link_misses": 0,
+    "schema_levels": {
+      "full": 1034
+    },
+    "sql_source": {
+      "fence": 1034
+    }
+  }
+}

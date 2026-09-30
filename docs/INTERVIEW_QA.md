@@ -90,3 +90,62 @@ execute, so an execution-repair loop has little to work with on Spider. For fine
 The before-and-after comparison has to be on BIRD, whose schemas are about five times larger. And it has to run
 the base and fine-tuned 4B through the same backend and quantization. Otherwise I'd be measuring Ollama's
 Q4_K_M against nf4 in transformers, not the effect of training.
+
+## Phase 2 — pipeline: linking, guard, repair
+
+**Q: How does your schema linker work, and how do you know it doesn't drop tables the query needs?**
+It's a retrieval problem. Every table gets a doc of its name and columns, and every column a doc of its name,
+BIRD's description and sample values. bge-small embeds those once per database, and the question plus BIRD's
+evidence is embedded per question. A table scores its best similarity over its own doc and its columns' docs,
+plus a small bonus if the question names it. Databases with at most 6 tables keep everything. Otherwise the linker
+keeps the top 4 and their foreign-key neighbors. I measure it by link recall: the share of questions whose kept
+tables include every table the gold SQL reads, with the gold tables found by the guard's own name resolver. It's
+100% on Spider dev, 99.7% on BIRD dev and 99.8% on BIRD mini-dev. The foreign-key hop does most of the work.
+Without it, BIRD recall on big databases falls to 87%, because join tables rarely look like the question. I tuned
+the two knobs, the bonus and bge's query instruction, on Spider train, never on dev.
+
+**Q: Your linker keeps 8 of 9 tables on BIRD. Then what is it for?**
+Deciding what to cut. BIRD prompts don't fit 2,048 tokens even with the right tables. The plan's order was to
+strip samples and descriptions everywhere first, and only then shrink the tables the linker didn't pick. I
+measured that order against the reverse before choosing. The plan's order threw away detail from exactly the
+tables that matter. On Spider it made linking a no-op, because the prompt came out identical to the full schema.
+Shrinking unselected tables first kept more of the gold columns' samples and descriptions, and cost 2 of 500 BIRD
+questions a gold column. Even then, 10% of BIRD mini-dev didn't fit. So the last resort prunes the selected tables'
+lowest-scored columns and keeps their keys, with a binary search on how many columns fit. Every prompt in all three
+dev sets now fits 2,048 tokens, and 99.2–100% still show every gold column (ADR-017).
+
+**Q: How does the SQL guard work, and does it ever block a valid query?**
+It parses the reply with sqlglot. It allows exactly one statement, requires it to be a query, rejects anything
+that writes (including `SELECT ... INTO`), and checks every table and column against the database. A block
+carries SQLite's own wording, which goes straight into the repair prompt. I validated it against SQLite itself
+on all 11,727 gold queries and on 2,068 model queries. It blocked one gold query, which really does name a table
+that doesn't exist, and nothing it blocked would have run. The first version did block valid queries: sqlglot
+lists a subquery's unqualified columns under the outer query too, as possible correlated references. The fix
+resolves each column once, from the innermost query outwards, as SQLite does. The guard checks names against
+the whole database, not just the tables in the prompt. A query that would run shouldn't fail because the linker
+left a table out.
+
+**Q: What did the pipeline ablation show?**
+On Spider, almost nothing moves. Linking changes EX by a tenth of a point, and repair adds 0.6–0.7 (p = 0.03 and
+0.02), because under 3% of Spider answers fail to run. BIRD is where it matters. Squeezing BIRD's schemas into
+the 2,048-token training length costs 3.2 points on the 9B and 2.4 on the 4B, and both are significant in a paired
+test. It isn't the linker: recall is 99.8%. It's what the prompt has to leave out, mostly sample values and
+descriptions. Repair then wins back 3.2 and 5.4 points and loses none, since it only touches queries that failed.
+Net: the full pipeline at 2,048 tokens ties the 9B's full-schema prompt at 4,096, and beats the 4B's by 3 points
+(p = 0.04). And the 9B's significant 5.8-point lead over the 4B on BIRD shrinks to 2.8, which isn't significant.
+
+**Q: How much does self-repair actually help, and where does it stop?**
+It turns about a quarter of the failures it retries into correct answers: 16 of 73 for the 9B on BIRD, 27 of 104
+for the 4B. Most first failures are guard blocks for a column that doesn't exist, and the repair turn usually
+fixes the name. But the query that then runs is right less than a third of the time, because fixing a name
+doesn't fix the reasoning. Repair can't help a query that runs and returns wrong rows, which is most misses. Two
+costs are worth knowing. Repair turns can outgrow the training length (19 of 133 for the 4B). And the 4B loops more
+when pushed back on: 12 of its 18 replies that ran out of tokens came in repair turns.
+
+**Q: If you rerun an experiment, do you get the same number?**
+From the recorded replies, exactly. Regenerating them, almost. Greedy decoding repeats itself within one loaded
+model, 60 of 60 in my probe. But after the server reloads the model, 14–15 of 60 replies differ, mostly in trivial
+ways. Regenerating a whole 500-question BIRD run gave 480 identical queries and one flipped answer: 43.6% against
+43.8%. So I treat the response cache as the record of a run. Every number in the tables re-scores recorded
+replies, every comparison is paired on the same questions, and configs that share a first turn share its recorded
+reply. The repair comparison measures repair and nothing else (ADR-020).

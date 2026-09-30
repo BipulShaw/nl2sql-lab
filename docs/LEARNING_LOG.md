@@ -160,6 +160,8 @@ Written as interview prep, so each number is either measured on this machine or 
   failure can be looked at again.
 - "In principle": a GPU may add floating-point numbers in a different order from one run to the next (batch
   size, kernel choice). That can flip a near-tie between two tokens, and from then on the outputs differ.
+  Phase 2 measured it: identical within one loaded session, but 14–15 of 60 replies differ after a model reload
+  ("Greedy isn't deterministic across model loads", Phase 2).
 - That's one reason for the **response cache** (`data/cache/llm_responses.sqlite`):
   - The key is a hash of the backend, the model digest, the quantization, the adapter and the full request.
   - A rerun reuses the recorded answer instead of hoping for the same one. So a fixed or added metric re-scores
@@ -310,3 +312,22 @@ Written as interview prep, so each number is either measured on this machine or 
   assistant turn in four forms (one containing a `<think>` block), and they matched exactly.
 - **Where:** `src/nl2sql/pipeline/runner.py`; the metrics `repair_rate`, `repair_success_rate` and
   `repaired_correct` in every manifest.
+
+### Greedy isn't deterministic across model loads
+- Temperature 0 means "take the likeliest token". So the same prompt should give the same reply. Within one
+  loaded model it does: 60 of 60 prompts sent twice back to back came back identical.
+- Across model loads it doesn't. The same 60 BIRD prompts, compared with replies recorded a few hours earlier
+  (the models had been swapped in and out in between), differed on 14–15.
+  - Mostly the differences are cosmetic: a column alias, an added `COALESCE`.
+  - Some change the query. One question got a degenerate reply (a run of zeros that Ollama cut off) five times in
+    one session and a normal answer after a reload.
+- **The likely mechanism** (not verified here): when the server loads a model it picks runtime settings from
+  free VRAM, such as how layers are split and which kernels run. A different order of floating-point additions
+  can flip a near-tie between the top two tokens, and every token after that follows the new path.
+- **What it does to a score:** regenerating the 9B's full 500-question BIRD run from scratch gave 480 identical
+  queries and EX 43.6% vs 43.8%, one flipped answer. That's small next to the effects measured, but it's not zero.
+- **How the project lives with it** (ADR-020):
+  - The response cache is the record: every reported number re-scores recorded replies, and re-scoring is exact.
+  - Comparisons are paired on the same questions, where random flips can't manufacture a one-sided gap.
+  - Configs that share a first turn share its recorded reply, so a repair comparison only measures repair.
+- **Where:** `scripts/determinism_probe.py`, `scripts/rerun_noise.py`.

@@ -18,21 +18,26 @@ def mcnemar_exact_p(only_a: int, only_b: int) -> float:
     return min(1.0, 2 * tail)
 
 
-def load_correct(run_dir: Path) -> dict[str, bool]:
+def load_correct(run_dir: Path) -> list[tuple[str, bool]]:
+    """(id, correct) per prediction, in the run's order."""
     with (run_dir / "predictions.jsonl").open(encoding="utf-8") as f:
-        return {r["id"]: bool(r["correct"]) for r in map(json.loads, f)}
+        return [(r["id"], bool(r["correct"])) for r in map(json.loads, f)]
 
 
 def compare_runs(run_a: Path, run_b: Path) -> dict:
-    """Counts of examples both, one or neither run got right, and McNemar's p for the two EX scores."""
+    """Counts of examples both, one or neither run got right, and McNemar's p for the two EX scores.
+
+    Records pair up by position, after checking both runs list the same ids in the same order. Pairing by id
+    would merge BIRD mini-dev's repeated questions: ids 137 and 138 each appear twice in the official file."""
     a, b = load_correct(run_a), load_correct(run_b)
-    if a.keys() != b.keys():
+    if [i for i, _ in a] != [i for i, _ in b]:
         raise ValueError("the runs cover different examples; compare runs of the same split and --limit")
-    only_a = sum(a[i] and not b[i] for i in a)
-    only_b = sum(b[i] and not a[i] for i in a)
-    both = sum(a[i] and b[i] for i in a)
+    pairs = [(x, y) for (_, x), (_, y) in zip(a, b, strict=True)]
+    only_a = sum(x and not y for x, y in pairs)
+    only_b = sum(y and not x for x, y in pairs)
+    both = sum(x and y for x, y in pairs)
     return {
-        "n": len(a),
+        "n": len(pairs),
         "both": both,
         "only_a": only_a,
         "only_b": only_b,

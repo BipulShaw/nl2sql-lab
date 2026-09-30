@@ -81,12 +81,8 @@ class OllamaLLM:
             "think": False,
         }
 
-    def generate(self, messages: list[dict[str, str]]) -> Generation:
-        prompt_tokens = self.count_chat_tokens(messages)
-        if prompt_tokens + self.max_new_tokens > self.num_ctx:
-            raise PromptTooLongError(
-                f"{prompt_tokens} prompt + {self.max_new_tokens} new > num_ctx {self.num_ctx}"
-            )
+    def request(self, messages: list[dict[str, str]]) -> tuple[dict, str]:
+        """The /api/chat payload for these messages, and its response-cache key."""
         payload = {
             "model": self.model,
             "messages": messages,
@@ -101,6 +97,15 @@ class OllamaLLM:
             adapter=None,
             payload=payload,
         )
+        return payload, key
+
+    def generate(self, messages: list[dict[str, str]]) -> Generation:
+        prompt_tokens = self.count_chat_tokens(messages)
+        if prompt_tokens + self.max_new_tokens > self.num_ctx:
+            raise PromptTooLongError(
+                f"{prompt_tokens} prompt + {self.max_new_tokens} new > num_ctx {self.num_ctx}"
+            )
+        payload, key = self.request(messages)
         if self.cache is not None and (hit := self.cache.get(key)) is not None:
             return Generation(**hit, cached=True)
 

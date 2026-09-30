@@ -690,7 +690,9 @@ native `/api/chat`, thinking off, `num_ctx` 8192):
     `JOIN Player p2 ON p2.player_api_id = '10000000000000000000000000000000…`
     - After about 112 generated tokens, Ollama ends the reply with HTTP 200 and `done: false`. It sends no
       prompt or output counts and no error, then cancels the task.
-    - This happened on 5 attempts out of 5, one of them a streamed replay, so it's deterministic.
+    - This happened on 5 attempts out of 5 within one loaded session, one of them a streamed replay. When the
+      model was reloaded for the final run, the same request got a normal, finished reply. A reply can change
+      between model loads (ADR-020).
 - Before this change, the first failure killed the run through a 500 that outlasted the retries, or a stall. The
   second killed it through ADR-012's check ("server read None"). That check exists to catch truncated prompts,
   which show up as a count that differs from the client's. A missing count isn't that. It's a reply the server
@@ -709,10 +711,58 @@ native `/api/chat`, thinking off, `num_ctx` 8192):
   - a finished reply whose count differs from the client's (ADR-012);
   - a 5xx or connection error that persists through every retry.
 - The read timeout drops from 600 s to 300 s. A 256-token reply takes seconds, and a cold 9B load under a minute.
-- Retrying can't change results: decoding is greedy with a fixed seed. Incomplete replies are cached like any
-  other, so a rerun reproduces them.
+- Within one loaded session, retrying sends an identical request and gets the same reply, so retries don't pick
+  among answers. Incomplete replies are cached like any other, so a rerun from the cache reproduces them.
 
 **Consequence.**
 - Ablation runs 1–7 ran at commit `42dbc46`, and runs 8–12 at the commit with this change. The change only
   affects how failed calls are handled. Runs 1–7 can't have met an unfinished reply, since under the old code
   one would have stopped the run, and all seven finished. Each manifest records its commit.
+
+## ADR-020 — Greedy replies change between model loads; the response cache is the record
+*2026-09-30, Phase 2*
+
+**Context.**
+- Eval decoding is greedy (temperature 0, seed 42), which the docs called deterministic "in principle"
+  (LEARNING_LOG, Phase 1). In Phase 2, BIRD question 1078 got the same degenerate reply 5 times in one session
+  and a normal reply after a model reload (ADR-019).
+- `scripts/determinism_probe.py` regenerates the base 4B's first 60 BIRD mini-dev prompts with the response
+  cache off and compares them with the replies recorded earlier the same day. `scripts/rerun_noise.py`
+  regenerates a whole recorded run and scores it.
+
+**Evidence.**
+- **Within one loaded session, replies repeat.** Each prompt sent twice back to back gave the same reply 60 of
+  60 times, whether or not the server reused a cached prompt prefix.
+- **Across sessions they don't.** Against replies recorded a few hours earlier, in sessions where models had
+  been unloaded and reloaded, 14 of 60 (pass 1) and 15 of 60 (pass 2) differ. Most differences are cosmetic
+  (column aliases, a `COALESCE`). Some change the query.
+- **What it does to EX** (`rerun_noise.py`: the 9B, full schema, all 500 BIRD mini-dev questions, regenerated
+  in a fresh session with the cache off):
+  - 480 of 500 queries are identical to the recorded ones.
+  - EX 43.6% against the recorded 43.8%: one question flipped, from right to wrong, and nothing the other way
+    (p = 1.0).
+  - The spread is about 0.2–0.4 points on this split. That's well below the ablation's significant effects
+    (2.4–5.4 points).
+- The cause isn't established. One guess, unverified: Ollama picks some runtime settings when it loads a model,
+  based on free VRAM, and those change the order of floating-point sums. That can flip a near-tie between two
+  tokens.
+
+**Decision.**
+- **The response cache is the record of a run.** Every reported number re-scores recorded replies. Rerunning a
+  config reproduces its manifest exactly, as runs 1 and 7 did for the Phase 1 baselines (74.3%, 73.4%).
+  Regenerating from scratch is a new sample, not a replication.
+- **Comparisons between configs are paired, on the same questions** (McNemar). Rerun noise flips answers both
+  ways at random, so it costs the test power but can't manufacture a one-sided difference.
+  - Repair comparisons are free of it by construction: a repair run reuses the linked run's first answers from
+    the cache, so only repair turns are new.
+  - For linking, only questions whose prompt changed got new replies.
+- The rerun spread is a reference, not a correction: a gap under about half a point on BIRD mini-dev, or one
+  that isn't significant in the paired test, isn't reported as a difference.
+
+**Consequence.**
+- "Reproducible" in this project means: from the pinned code, data and the committed manifest, the same replies
+  re-score to the same numbers. It doesn't mean that regenerating replies from scratch lands on the same EX.
+  The spread above is how far it can move.
+- Exact re-scoring needs the recorded replies: `data/cache/llm_responses.sqlite` and each run's
+  `predictions.jsonl`. Neither is in the public repo yet, and neither holds anything private. Publishing them
+  with the final runs is an open decision.

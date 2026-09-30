@@ -1,7 +1,7 @@
 # Status
 
-**Current phase:** Phase 1 (baseline) is done, tagged `v0.1-baseline`. Next: Phase 2 (pipeline).
-**Last updated:** 2026-09-29
+**Current phase:** Phase 2 (pipeline) is done, tagged `v0.2-pipeline`. Next: Phase 3 (fine-tuning the 4B).
+**Last updated:** 2026-09-30
 
 ---
 
@@ -186,15 +186,140 @@ One example is about 0.1 EX points.
 - **BIRD train (8.9 GB)** is not downloaded. It's only needed for Phase 3's training data, and at over 5 GB it
   needs Bipul's approval first.
 
-## Next: Phase 2 (pipeline)
-- Schema linking with a link-recall metric (target: recall ≥ 95%).
-- SQL guard (`sqlglot`) with its table of tests, the repair loop, and typed events.
-- Ablations on Spider dev and BIRD mini-dev for the 9B and the 4B base: full schema vs linked, repair 0 vs 2.
-- Checkpoint: tag `v0.2-pipeline`.
+## Phase 2 — pipeline (2026-09-29 to 2026-09-30)
+
+### Results: the ablation, both models, full dev splits
+
+Every run is through Ollama at Q4_K_M, with thinking off, greedy decoding, and all 1,034 Spider dev or 500 BIRD
+mini-dev questions:
+- **full:** the whole schema, at a 3,072-token schema budget in 4,096 total.
+- **linked:** schema linking, at the 1,536-in-2,048 training budget (ADR-017).
+- **+ repair:** linked, with the guard on and up to 2 repair turns (ADR-016, ADR-018).
+
+The generated table with every metric is `results/RESULTS.md`. p-values are McNemar's exact test on the same
+questions (`nl2sql results compare`).
+
+| | Spider dev EX | BIRD mini-dev EX | BIRD link recall | BIRD repair rate | p50 latency (BIRD) |
+|---|---|---|---|---|---|
+| 9B full | 74.3% | 43.8% | – | – | 1,814 ms |
+| 9B linked | 74.4% | 40.6% | 99.8% | – | 1,915 ms |
+| 9B linked + repair | **75.0%** | **43.8%** | 99.8% | 14.6% | 2,086 ms |
+| 4B full | 73.4% | 38.0% | – | – | 1,443 ms |
+| 4B linked | 73.3% | 35.6% | 99.8% | – | 1,519 ms |
+| 4B linked + repair | **74.0%** | **41.0%** | 99.8% | 20.8% | 1,616 ms |
+
+- **Linking costs BIRD points, and repair wins them back.**
+  - Full → linked on BIRD: −3.2 points for the 9B (21 lost, 5 won, p = 0.002) and −2.4 for the 4B (20 lost,
+    8 won, p = 0.036).
+  - The losses aren't linker misses. Recall is 99.8%, one question in 500, and the 9B answered that one
+    correctly anyway. They come from fitting 2,048 tokens: of the 21 the 9B lost, 11 had lost the selected
+    tables' samples, 5 their descriptions, and 5 had pruned columns.
+  - On Spider, linking changes nothing measurable (+0.1 and −0.1 points).
+- **Repair's gain is real, and bounded by failures.**
+  - Linked → linked + repair: +3.2 points for the 9B on BIRD (16 won, 0 lost), +5.4 for the 4B (27 won,
+    0 lost), and +0.6 and +0.7 on Spider (p = 0.031 and 0.016).
+  - Repair never lost a question. It only acts on queries that failed, and those were already wrong.
+- **Net, full → linked + repair:**
+  - 9B: +0.0 on BIRD (17 won, 17 lost) and +0.7 on Spider (p = 0.065).
+  - 4B: +3.0 on BIRD (30 won, 15 lost, p = 0.036) and +0.6 on Spider (p = 0.18).
+  - So at the training length, the full pipeline matches or beats the full-schema prompt at twice the length.
+- **The 4B gains most from repair** because it fails most. With the full schema, 18.4% of its BIRD answers fail
+  to run, against 11.6% for the 9B.
+  - With the full schema, the 9B is ahead on BIRD by 5.8 points (66 vs 37 disagreements, p = 0.006).
+  - With linking and repair, the gap is 2.8 points and no longer significant (51 vs 37, p = 0.17).
+
+### What the repair turns did (BIRD mini-dev)
+
+| | 9B | 4B |
+|---|---|---|
+| Questions repaired | 73 | 104 |
+| First failure: guard block / SQLite error / timeout | 57 / 15 / 1 | 78 / 26 / 0 |
+| Guard blocks for a column that doesn't exist | 51 | 67 |
+| Ended on a query that ran | 58 (79%) | 84 (81%) |
+| … and correct | 16 | 27 |
+| Still failing after 2 repairs | 15 | 20 |
+| Repair-turn prompts over 2,048 tokens | 10 of 95 | 19 of 133 |
+
+- A repair turn usually fixes the error it's told about, but the query that then runs is right less than a third
+  of the time. Repair fixes names, not understanding.
+- The 4B loops more under a repair turn. 12 of its 18 replies cut off at 256 tokens came in repair turns.
+
+### Linking and the guard (ADR-016, ADR-017)
+- **Link recall** (`nl2sql link-recall`): Spider dev 100%, BIRD dev 99.7%, BIRD mini-dev 99.8%; Spider train
+  97.4% (94.3% on databases with more than 6 tables).
+  - k=4 with one foreign-key hop keeps 8.3 of BIRD's 9.1 tables on average, so linking's real job is choosing
+    what to cut.
+  - The bonus and instruction were chosen on Spider train.
+- **Every linked prompt fits 2,048 tokens:**
+  - Shedding order: unselected tables first, then the selected tables' samples and descriptions, then their
+    lowest-scored columns.
+  - Spider dev: 100% of prompts keep every gold column. BIRD dev: 99.3%.
+- **The guard** blocked 0 gold queries in every dev split, and nothing it blocked would have run. In the ablation
+  it made 11–16% of first BIRD answers go to repair with SQLite's exact error message.
+
+### Reliability (ADR-019)
+- On one BIRD question, the 4B's reply degenerated into a run of zeros, and Ollama ended it early with HTTP 200,
+  `done: false` and no token counts. That stopped the run under ADR-012's count check.
+- Another long 4B request hung inside Ollama for 15 minutes and then returned 500.
+- The client now retries a reply Ollama didn't finish, and keeps one that stays unfinished as `incomplete`
+  (scored like a reply cut off at 256 tokens). A count that differs still stops the run.
+- Runs 1–7 ran at `42dbc46` and runs 8–12 at `774a419`. The change only affects failed calls, and the final
+  runs had no retries and no incomplete replies.
+- **Greedy isn't reproducible across model loads** (ADR-020).
+  - Within one loaded session, the same request gives the same reply (60 of 60).
+  - After reloads, 14–15 of 60 replies differ, mostly in cosmetic ways.
+  - Regenerating the 9B's whole BIRD full-schema run from scratch: 480 of 500 queries identical, EX 43.6% vs
+    43.8% (one flip, p = 1.0).
+  - Every reported number re-scores recorded replies from the response cache, and comparisons are paired.
+
+### What Phase 2 found (each finding changes something later)
+1. **At the 2,048-token training length, BIRD loses about 3 points to what the prompt must leave out.** That's
+   the cost Phase 3 trains under. Fine-tuning has to recover it or beat it, and the comparison is against
+   linked + repair, the configuration that fits.
+2. **Repair turns about a quarter of the failing queries it retries into correct ones** (22% for the 9B, 26%
+   for the 4B). It's the cheapest gain in the project: +3 to +5 points on BIRD, for 6–9% more median latency than
+   linking alone.
+   It can't touch misses that run and return the wrong rows, which is most of them. Only better SQL fixes
+   those.
+3. **The 4B's most common failure is naming a column that doesn't exist** (67 of its 104 repairs). It's the
+   error fine-tuning should reduce most, and the guard's block rate measures it before and after.
+4. **Repair-turn prompts can exceed the training length** (19 of 133 for the 4B). A model trained only on
+   single-turn prompts meets repair turns only at inference. The client still enforces the context window.
+5. **Ollama isn't a perfect oracle:** a reply can end unfinished or hang (ADR-019).
+
+### Phase 2 checklist
+- [x] SQL guard with 45 table-driven tests, validated against SQLite on every gold query and on Phase 1's
+  predictions (ADR-016)
+- [x] bge-small schema linker, `nl2sql link-recall`, recall ≥ 95% on both dev sets (ADR-017)
+- [x] Serializer shedding order for linked prompts, and column pruning (ADR-017)
+- [x] Pipeline with typed events and the repair loop; the harness records from events; multi-turn token counts
+  checked (ADR-018)
+- [x] Manifest metrics: guard block rate, repair rate and success, repaired-correct, link recall, end-to-end
+  latency
+- [x] Ablation on Spider dev and BIRD mini-dev for the 9B and 4B base: full vs linked, repair 0 vs 2
+- [x] LEARNING_LOG: bi-encoders and recall, tuning without the test set, shedding order and pruning, sqlglot
+  scopes, self-repair
+- [x] Tag `v0.2-pipeline`
+
+### Moved to later phases
+- **BIRD dev (1,534):** Phase 2's ablation uses mini-dev, as planned, so the BIRD dev column of the plan's
+  table is still empty. A BIRD dev run takes about three times as long as a mini-dev run.
+- **A cross-encoder reranker:** recall is already 99.7%+; the losses are in what the budget cuts.
+
+## Next: Phase 3 (fine-tuning the 4B)
+- nf4 vs int8 check for the 4B in transformers (ADR-004), and the base 4B re-run through that backend.
+- Training data from Spider train and BIRD train (8.9 GB download, needs approval), serialized exactly as the
+  linked pipeline serializes: 1,536 schema tokens in 2,048.
+- QLoRA run, with the time estimate shown first. Compare with the base 4B through the same pipeline and
+  backend, using the paired test.
+- Checkpoint: tag `v0.3-finetune`.
 
 ## Open problems / notes
 - A run fails at startup, before any example, if Ollama isn't reachable or the model isn't pulled
   (`OllamaLLM.describe`).
+- After a Windows restart, Ollama isn't running until the Ollama app is started.
+- BIRD mini-dev's official file repeats questions 137 and 138 (identical copies). EX scores all 500 rows, and
+  paired comparisons pair runs by position (`nl2sql results compare`).
 - Hub downloads are unauthenticated (rate-limited). Setting `HF_TOKEN` is optional.
 - Commits use a repo-local identity (a GitHub noreply address), not the machine's global git config.
 - The DeltaNet kernels' effect on training throughput is unmeasured until Phase 3's 30-step check.

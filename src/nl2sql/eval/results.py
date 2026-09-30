@@ -83,7 +83,7 @@ def ablation_row(m: dict) -> str:
         pct(metrics["guard_block_rate"]),
         pct(metrics["repair_rate"]),
         pct(metrics["repair_success_rate"]),
-        str(m["counts"].get("repaired_correct", "–")),
+        str(m["counts"]["repaired_correct"]) if config["repair"]["max_repairs"] else "–",
         latency(m),
         f"`{m['run_id']}`",
     ]

@@ -18,27 +18,54 @@ come from Phase 1 manifests, which timed the model call alone.
 
 ## Pipeline ablation (PLAN §9)
 
-**Link recall**: share of questions whose linked tables include every table the gold query reads.
-**Guard blocks**: share of first answers the guard stopped before execution. **Repair rate**: share of
+**Link recall**: share of questions whose linked tables include every table the gold query
+reads. **Guard blocks**: share of first answers the guard stopped before execution. **Repair rate**: share of
 questions that needed at least one repair turn; **repair success**: share of those that ended on a query
 that ran (right or wrong); **won by repair**: repaired questions scored correct, each one a point the
 first answer lost, since that answer could not run.
+
+### bird-mini dev
+
+| Config | Model | Schema | Guard | Repairs | EX | EX (valid gold) | Link recall | Guard blocks | Repair rate | Repair success | Won by repair | p50 ms | Run |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `base_4b_local` | `qwen3.5:4b` | full | off | 0 | **38.0** | 38.1 | – | – | – | – | – | 1443 | `20260930-153856_bird-mini-dev_base_4b_local_n500` |
+| `linked_4b_local` | `qwen3.5:4b` | linked | off | 0 | **35.6** | 35.7 | 99.8 | – | – | – | – | 1519 | `20260930-155249_bird-mini-dev_linked_4b_local_n500` |
+| `linked_repair2_4b_local` | `qwen3.5:4b` | linked | on | 2 | **41.0** | 41.2 | 99.8 | 15.6 | 20.8 | 80.8 | 27 | 1616 | `20260930-175134_bird-mini-dev_linked_repair2_4b_local_n500` |
+| `base_9b_local` | `qwen3.5:9B` | full | off | 0 | **43.8** | 44.0 | – | – | – | – | – | 1814 | `20260930-114559_bird-mini-dev_base_9b_local_n500` |
+| `linked_9b_local` | `qwen3.5:9B` | linked | off | 0 | **40.6** | 40.8 | 99.8 | – | – | – | – | 1915 | `20260930-121639_bird-mini-dev_linked_9b_local_n500` |
+| `linked_repair2_9b_local` | `qwen3.5:9B` | linked | on | 2 | **43.8** | 44.0 | 99.8 | 11.4 | 14.6 | 79.5 | 16 | 2086 | `20260930-122315_bird-mini-dev_linked_repair2_9b_local_n500` |
 
 ### spider dev
 
 | Config | Model | Schema | Guard | Repairs | EX | EX (valid gold) | Link recall | Guard blocks | Repair rate | Repair success | Won by repair | p50 ms | Run |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| `base_4b_local` | `qwen3.5:4b` | full | off | 0 | **73.4** | 73.4 | – | – | – | – | – | 810† | `20260929-104302_spider-dev_base_4b_local_n1034` |
-| `base_9b_local` | `qwen3.5:9B` | full | off | 0 | **74.3** | 74.3 | – | – | – | – | – | 1256† | `20260929-102401_spider-dev_base_9b_local_n1034` |
+| `base_4b_local` | `qwen3.5:4b` | full | off | 0 | **73.4** | 73.4 | – | – | – | – | – | 812 | `20260930-122921_spider-dev_base_4b_local_n1034` |
+| `linked_4b_local` | `qwen3.5:4b` | linked | off | 0 | **73.3** | 73.3 | 100.0 | – | – | – | – | 842 | `20260930-154840_spider-dev_linked_4b_local_n1034` |
+| `linked_repair2_4b_local` | `qwen3.5:4b` | linked | on | 2 | **74.0** | 74.0 | 100.0 | 1.7 | 2.2 | 91.3 | 7 | 838 | `20260930-175004_spider-dev_linked_repair2_4b_local_n1034` |
+| `base_9b_local` | `qwen3.5:9B` | full | off | 0 | **74.3** | 74.3 | – | – | – | – | – | 1257 | `20260930-114545_spider-dev_base_9b_local_n1034` |
+| `linked_9b_local` | `qwen3.5:9B` | linked | off | 0 | **74.4** | 74.4 | 100.0 | – | – | – | – | 1282 | `20260930-120320_spider-dev_linked_9b_local_n1034` |
+| `linked_repair2_9b_local` | `qwen3.5:9B` | linked | on | 2 | **75.0** | 75.0 | 100.0 | 1.3 | 1.3 | 100.0 | 6 | 1279 | `20260930-122151_spider-dev_linked_repair2_9b_local_n1034` |
 
 ## All model runs
 
 | Date | Data | n | Model | Quant | Linking | Repairs | EX | EX (valid gold) | EX (any col. order) | p50 ms | Run |
 |---|---|---|---|---|---|---|---|---|---|---|---|
+| 2026-09-30 | bird-mini dev | 500/500 | `qwen3.5:9B` | Q4_K_M | off | 0 | **43.8** | 44.0 | 44.2 | 1814 | `20260930-114559_bird-mini-dev_base_9b_local_n500` |
+| 2026-09-30 | bird-mini dev | 500/500 | `qwen3.5:9B` | Q4_K_M | on | 0 | **40.6** | 40.8 | 41.0 | 1915 | `20260930-121639_bird-mini-dev_linked_9b_local_n500` |
+| 2026-09-30 | bird-mini dev | 500/500 | `qwen3.5:9B` | Q4_K_M | on | 2 | **43.8** | 44.0 | 44.2 | 2086 | `20260930-122315_bird-mini-dev_linked_repair2_9b_local_n500` |
+| 2026-09-30 | bird-mini dev | 500/500 | `qwen3.5:4b` | Q4_K_M | off | 0 | **38.0** | 38.1 | 38.2 | 1443 | `20260930-153856_bird-mini-dev_base_4b_local_n500` |
+| 2026-09-30 | bird-mini dev | 500/500 | `qwen3.5:4b` | Q4_K_M | on | 0 | **35.6** | 35.7 | 35.8 | 1519 | `20260930-155249_bird-mini-dev_linked_4b_local_n500` |
+| 2026-09-30 | bird-mini dev | 500/500 | `qwen3.5:4b` | Q4_K_M | on | 2 | **41.0** | 41.2 | 41.2 | 1616 | `20260930-175134_bird-mini-dev_linked_repair2_4b_local_n500` |
 | 2026-09-27 | spider dev | 200/1034 | `qwen3.5:9B` | Q4_K_M | off | 0 | **75.0** | 75.0 | – | 1172† | `20260927-195159_spider-dev_base_9b_local_n200` |
 | 2026-09-29 | spider dev | 1034/1034 | `qwen3.5:9B` | Q4_K_M | off | 0 | **74.3** | 74.3 | 79.2 | 1256† | `20260929-102401_spider-dev_base_9b_local_n1034` |
 | 2026-09-29 | spider dev | 200/1034 | `qwen3.5:4b` | Q4_K_M | off | 0 | **72.0** | 72.0 | 76.0 | 830† | `20260929-103921_spider-dev_base_4b_local_n200` |
 | 2026-09-29 | spider dev | 1034/1034 | `qwen3.5:4b` | Q4_K_M | off | 0 | **73.4** | 73.4 | 77.5 | 810† | `20260929-104302_spider-dev_base_4b_local_n1034` |
+| 2026-09-30 | spider dev | 1034/1034 | `qwen3.5:9B` | Q4_K_M | off | 0 | **74.3** | 74.3 | 79.2 | 1257 | `20260930-114545_spider-dev_base_9b_local_n1034` |
+| 2026-09-30 | spider dev | 1034/1034 | `qwen3.5:9B` | Q4_K_M | on | 0 | **74.4** | 74.4 | 79.2 | 1282 | `20260930-120320_spider-dev_linked_9b_local_n1034` |
+| 2026-09-30 | spider dev | 1034/1034 | `qwen3.5:9B` | Q4_K_M | on | 2 | **75.0** | 75.0 | 79.8 | 1279 | `20260930-122151_spider-dev_linked_repair2_9b_local_n1034` |
+| 2026-09-30 | spider dev | 1034/1034 | `qwen3.5:4b` | Q4_K_M | off | 0 | **73.4** | 73.4 | 77.5 | 812 | `20260930-122921_spider-dev_base_4b_local_n1034` |
+| 2026-09-30 | spider dev | 1034/1034 | `qwen3.5:4b` | Q4_K_M | on | 0 | **73.3** | 73.3 | 77.4 | 842 | `20260930-154840_spider-dev_linked_4b_local_n1034` |
+| 2026-09-30 | spider dev | 1034/1034 | `qwen3.5:4b` | Q4_K_M | on | 2 | **74.0** | 74.0 | 78.1 | 838 | `20260930-175004_spider-dev_linked_repair2_4b_local_n1034` |
 
 ## Harness sanity check: gold SQL scored as the prediction
 
