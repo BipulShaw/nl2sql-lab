@@ -100,6 +100,35 @@ def eval_command(
     console.print({k: v for k, v in counts.items() if v})
 
 
+@app.command("link-recall")
+def link_recall_command(
+    dataset: Annotated[str, typer.Option(help="spider, bird or bird-mini")],
+    split: Annotated[str, typer.Option()] = "dev",
+    k: Annotated[int | None, typer.Option(help="tables kept before foreign-key neighbors")] = None,
+    fk_hops: Annotated[int | None, typer.Option(help="foreign-key hops added around the top k")] = None,
+) -> None:
+    """Share of questions whose linked tables include every table the gold SQL reads (PLAN §6.2)."""
+    from nl2sql.config import LinkingConfig
+    from nl2sql.linking.recall import link_recall
+    from nl2sql.pipeline.runner import make_linker
+
+    overrides = {"top_k": k, "fk_hops": fk_hops}
+    config = LinkingConfig(enabled=True, **{key: v for key, v in overrides.items() if v is not None})
+    r = link_recall(dataset, split, config, make_linker(config))
+    console.print(f"{dataset} {split}, top_k={config.top_k}, fk_hops={config.fk_hops}")
+    console.print(
+        f"link recall {r['recall']:.4f} over {r['n']} questions ({r['gold_unparsed']} gold unparsed)"
+    )
+    if r["n_big_db"]:
+        console.print(
+            f"on databases with more than {config.all_tables_up_to} tables: {r['recall_big_db']:.4f} over "
+            f"{r['n_big_db']} questions, keeping {r['mean_tables_kept_big_db']} of "
+            f"{r['mean_tables_big_db']} tables on average"
+        )
+    for miss in r["misses"][:10]:
+        console.print(f"  missed: {miss['id']} ({miss['db_id']}) kept {', '.join(miss['linked'])}")
+
+
 @results_app.command("table")
 def results_table() -> None:
     """Regenerate results/RESULTS.md from all run manifests."""

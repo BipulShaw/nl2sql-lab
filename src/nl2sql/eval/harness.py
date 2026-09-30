@@ -18,18 +18,27 @@ from rich.progress import Progress
 from nl2sql.config import ExecConfig, RunConfig
 from nl2sql.data import DATA_DIR, Example, load_examples, stratified_sample
 from nl2sql.eval.ex_metric import score_prediction
+from nl2sql.linking.recall import gold_tables, link_hit
 from nl2sql.llm.cache import ResponseCache
 from nl2sql.llm.ollama import OllamaLLM
-from nl2sql.prompting.builder import build_messages, extract_sql
-from nl2sql.schema.introspect import load_schema
-from nl2sql.schema.serialize import SerializedSchema, serialize_schema
+from nl2sql.pipeline.events import (
+    Event,
+    Executed,
+    GuardChecked,
+    PromptBuilt,
+    RunFailed,
+    RunFinished,
+    SchemaLinked,
+    SqlGenerated,
+)
+from nl2sql.pipeline.runner import Pipeline, make_linker
 
 RUNS_DIR = Path("results/runs")
 RESPONSE_CACHE = DATA_DIR / "cache" / "llm_responses.sqlite"
 
 
 class Predictor:
-    """Full schema → prompt → model → extracted SQL, for one example at a time."""
+    """One example at a time through the pipeline (nl2sql.pipeline), recorded from its events."""
 
     def __init__(self, config: RunConfig, use_cache: bool) -> None:
         from nl2sql.llm.tokens import ChatTokenizer  # imports transformers, which gold runs do not need
@@ -50,51 +59,61 @@ class Predictor:
                 f"Ollama serves {config.model_id} as {self.llm.info['quantization']}, "
                 f"but the config says {config.quantization}"
             )
-        self.schemas: dict[Path, SerializedSchema] = {}  # no linking yet, so one serialization per database
-
-    def schema_for(self, example: Example) -> SerializedSchema:
-        if example.db_path not in self.schemas:
-            self.schemas[example.db_path] = serialize_schema(
-                load_schema(example.db_path, example.db_id),
-                self.tokenizer.count,
-                self.config.prompt.schema_token_budget,
-                include_samples=self.config.prompt.include_samples,
-            )
-        return self.schemas[example.db_path]
+        linker = make_linker(config.linking) if config.linking.enabled else None
+        self.pipeline = Pipeline(config, self.llm, self.tokenizer.count, self.tokenizer.count_chat, linker)
 
     def predict(self, example: Example) -> dict:
-        schema = self.schema_for(example)
-        messages = build_messages(example.db_id, schema.text, example.question, example.evidence)
-        prompt_tokens = self.tokenizer.count_chat(messages)
-        record = {
-            "status": "ok",
-            "pred": None,
-            "attempts": [],
-            "schema_level": schema.level,
-            "schema_tokens": schema.tokens,
-            "prompt_tokens": prompt_tokens,
-            "output_tokens": 0,
-            "finish_reason": None,
-            "latency_ms": None,
-            "cached": False,
-            "think_leak": False,
-        }
-        if prompt_tokens + self.config.decoding.max_new_tokens > self.config.prompt.max_total_tokens:
-            record["status"] = "prompt_too_long"  # not sent; counts as wrong
-            return record
-        generation = self.llm.generate(messages)
-        extraction = extract_sql(generation.text)
-        record.update(
-            status="ok" if extraction.sql else "no_sql",
-            pred=extraction.sql,
-            attempts=[{"raw": generation.text, "sql": extraction.sql, "source": extraction.source}],
-            output_tokens=generation.output_tokens,
-            finish_reason=generation.finish_reason,
-            latency_ms=round(generation.latency_ms, 1),
-            cached=generation.cached,
-            think_leak=extraction.think_leak,
-        )
+        events = self.pipeline.run(example.db_path, example.db_id, example.question, example.evidence)
+        record = record_from_events(list(events))
+        if record["linked_tables"] is not None:
+            schema = self.pipeline.schema(example.db_path, example.db_id)
+            record["link_hit"] = link_hit(gold_tables(example.gold_sql, schema), record["linked_tables"])
         return record
+
+
+def record_from_events(events: list[Event]) -> dict:
+    """The prediction record of one pipeline run. `pred` is the last SQL the model wrote, scored even when the
+    pipeline gave up on it; `failure` says why it gave up, from the last attempt."""
+    record: dict = {"linked_tables": None, "link_hit": None, "attempts": []}
+    attempts = record["attempts"]
+    for event in events:
+        if isinstance(event, SchemaLinked):
+            record["linked_tables"] = event.tables
+        elif isinstance(event, PromptBuilt):
+            record.update(schema_level=event.schema_level, schema_tokens=event.schema_tokens)
+            record["prompt_tokens"] = event.tokens  # the first turn's; tokens_in adds the repair turns
+        elif isinstance(event, SqlGenerated):
+            attempts.append(event.model_dump(exclude={"type", "attempt"}) | {"guard": None, "exec": None})
+        elif isinstance(event, GuardChecked):
+            attempts[-1]["guard"] = "ok" if event.ok else event.reason
+        elif isinstance(event, Executed):
+            attempts[-1]["exec"] = {"rows": event.rows, "error": event.error, "timed_out": event.timed_out}
+        elif isinstance(event, RunFinished | RunFailed):
+            record.update(
+                pred=event.sql, pipeline_ok=isinstance(event, RunFinished), latency_ms=event.latency_ms
+            )
+
+    last = attempts[-1] if attempts else None
+    if last is None:
+        failure = "prompt_too_long"
+    elif record["pipeline_ok"]:
+        failure = None
+    elif last["sql"] is None:
+        failure = "no_sql"
+    elif last["guard"] not in (None, "ok"):
+        failure = "guard_blocked"
+    else:
+        failure = "timeout" if last["exec"]["timed_out"] else "exec_error"
+    record.update(
+        status="prompt_too_long" if last is None else "ok" if record["pred"] else "no_sql",
+        failure=failure,
+        repairs=max(len(attempts) - 1, 0),
+        output_tokens=sum(a["output_tokens"] for a in attempts),
+        finish_reason=last["finish_reason"] if last else None,
+        cached=bool(attempts) and all(a["cached"] for a in attempts),
+        think_leak=any(a["think_leak"] for a in attempts),
+    )
+    return record
 
 
 def example_fields(example: Example) -> dict:
@@ -189,7 +208,8 @@ def run_eval(
         "started_at": started.isoformat(timespec="seconds"),
         "ended_at": ended.isoformat(timespec="seconds"),
         "duration_s": round((ended - started).total_seconds(), 1),
-        "metrics": metrics(records),
+        "latency_scope": "pipeline",  # linking through execution; Phase 1 manifests timed generation only
+        "metrics": metrics(records, config if predictor else None),
         "counts": counts(records),
     }
     run_dir = RUNS_DIR / run_id
@@ -207,8 +227,18 @@ def ratio(part: int, whole: int) -> float | None:
     return round(part / whole, 4) if whole else None
 
 
-def metrics(records: list[dict]) -> dict:
+def metrics(records: list[dict], config: RunConfig | None) -> dict:
+    """A pipeline metric is None when the run did not use that stage, and in gold runs."""
     n = len(records)
+    guard = config is not None and config.guard.enabled
+    repair = config is not None and config.repair.max_repairs > 0
+    linking = config is not None and config.linking.enabled
+    attempts = [a for r in records for a in r.get("attempts", [])]
+    blocked_first = sum(
+        bool(r["attempts"]) and r["attempts"][0]["guard"] not in (None, "ok") for r in records
+    )
+    repaired = [r for r in records if r.get("repairs")]
+    linked = [r for r in records if r.get("link_hit") is not None]
     valid_gold = [r for r in records if r["gold_valid"]]
     by_difficulty = {}
     for difficulty in sorted({r["difficulty"] for r in records if r["difficulty"]}):
@@ -226,13 +256,16 @@ def metrics(records: list[dict]) -> dict:
         "ex_by_difficulty": by_difficulty or None,
         "parse_valid_rate": ratio(sum(r["pred_parses"] for r in records), n),
         "exec_error_rate": ratio(sum(bool(r["pred_exec"]) and not r["pred_exec"]["ok"] for r in records), n),
-        "guard_block_rate": None,  # guard, repair and linking arrive in Phase 2
-        "repair_rate": None,
-        "repair_success_rate": None,
-        "link_recall": None,
+        "guard_block_rate": ratio(blocked_first, n) if guard else None,  # first answers the guard stopped
+        "repair_rate": ratio(len(repaired), n) if repair else None,
+        # of the repaired: the pipeline ended on a query that ran, whether or not it was correct
+        "repair_success_rate": ratio(sum(r["pipeline_ok"] for r in repaired), len(repaired))
+        if repair
+        else None,
+        "link_recall": ratio(sum(r["link_hit"] for r in linked), len(linked)) if linking else None,
         "p50_latency_ms": round(statistics.median(latencies), 1) if latencies else None,
-        "tokens_in": sum(r.get("prompt_tokens", 0) for r in records),
-        "tokens_out": sum(r.get("output_tokens", 0) for r in records),
+        "tokens_in": sum(a["prompt_tokens"] for a in attempts),  # sent to the model, repair turns included
+        "tokens_out": sum(a["output_tokens"] for a in attempts),
         "api_cost_usd": 0.0,
     }
 
@@ -240,6 +273,8 @@ def metrics(records: list[dict]) -> dict:
 def counts(records: list[dict]) -> dict:
     def pred_flag(r: dict, key: str) -> bool:
         return bool(r["pred_exec"] and r["pred_exec"][key])
+
+    attempts = [a for r in records for a in r.get("attempts", [])]
 
     return {
         "correct": sum(r["correct"] for r in records),
@@ -254,8 +289,13 @@ def counts(records: list[dict]) -> dict:
         "pred_more_rows_than_gold": sum(r["gold_valid"] and pred_flag(r, "truncated") for r in records),
         "ordered_comparisons": sum(r["ordered"] for r in records),
         "think_leaks": sum(r.get("think_leak", False) for r in records),
-        "finish_length": sum(r.get("finish_reason") == "length" for r in records),
-        "cache_hits": sum(r.get("cached", False) for r in records),
+        "finish_length": sum(a["finish_reason"] == "length" for a in attempts),
+        "cache_hits": sum(a["cached"] for a in attempts),
+        "pipeline_failures": dict(Counter(r["failure"] for r in records if r.get("failure"))),
+        "repaired": sum(bool(r.get("repairs")) for r in records),
+        # a repaired example's first answer was blocked or failed to run: each of these is EX the repair won
+        "repaired_correct": sum(bool(r.get("repairs")) and r["correct"] for r in records),
+        "link_misses": sum(r.get("link_hit") is False for r in records),
         "schema_levels": dict(Counter(r["schema_level"] for r in records if r.get("schema_level"))),
         "sql_source": dict(Counter(a["source"] for r in records for a in r.get("attempts", [])[:1])),
     }

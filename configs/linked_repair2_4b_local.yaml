@@ -1,0 +1,15 @@
+# Ablation row D: linked_repair2_9b_local's pipeline on the base 4B (PLAN §9).
+model_id: qwen3.5:4b
+backend: ollama
+base_url: http://localhost:11434
+quantization: Q4_K_M            # must match what Ollama reports for model_id; checked at run start
+context_window: 8192            # sent as num_ctx on every call (ADR-007)
+thinking: false
+tokenizer: {id: Qwen/Qwen3.5-4B, revision: 851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a}
+linking: {enabled: true, top_k: 4, fk_hops: 1, lexical_bonus: 0.1, embed_model: BAAI/bge-small-en-v1.5}
+prompt: {schema_token_budget: 1536, max_total_tokens: 2048, include_samples: true}
+decoding: {max_new_tokens: 256, greedy: true}
+repair: {max_repairs: 2, on_empty_result: false}
+guard: {enabled: true, dialect: sqlite, inject_limit: false}
+exec: {timeout_s: 30, max_rows: 1000000}   # row cap on the gold result (ADR-013)
+seed: 42

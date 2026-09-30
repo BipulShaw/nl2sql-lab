@@ -12,14 +12,33 @@ column rule costs. Neither official evaluator computes exactly EX: BIRD's compar
 in `docs/DECISIONS.md`). If `n` is smaller than the split, the run used a stratified sample (`--limit`,
 seed in the manifest).
 
-## Model runs
+**p50 ms** is the median time per question from linking through executing the final query, repairs
+included; a reply served from the response cache counts at its original generation time. Values marked †
+come from Phase 1 manifests, which timed the model call alone.
+
+## Pipeline ablation (PLAN §9)
+
+**Link recall**: share of questions whose linked tables include every table the gold query reads.
+**Guard blocks**: share of first answers the guard stopped before execution. **Repair rate**: share of
+questions that needed at least one repair turn; **repair success**: share of those that ended on a query
+that ran (right or wrong); **won by repair**: repaired questions scored correct, each one a point the
+first answer lost, since that answer could not run.
+
+### spider dev
+
+| Config | Model | Schema | Guard | Repairs | EX | EX (valid gold) | Link recall | Guard blocks | Repair rate | Repair success | Won by repair | p50 ms | Run |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `base_4b_local` | `qwen3.5:4b` | full | off | 0 | **73.4** | 73.4 | – | – | – | – | – | 810† | `20260929-104302_spider-dev_base_4b_local_n1034` |
+| `base_9b_local` | `qwen3.5:9B` | full | off | 0 | **74.3** | 74.3 | – | – | – | – | – | 1256† | `20260929-102401_spider-dev_base_9b_local_n1034` |
+
+## All model runs
 
 | Date | Data | n | Model | Quant | Linking | Repairs | EX | EX (valid gold) | EX (any col. order) | p50 ms | Run |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| 2026-09-27 | spider dev | 200/1034 | `qwen3.5:9B` | Q4_K_M | off | 0 | **75.0** | 75.0 | – | 1172 | `20260927-195159_spider-dev_base_9b_local_n200` |
-| 2026-09-29 | spider dev | 1034/1034 | `qwen3.5:9B` | Q4_K_M | off | 0 | **74.3** | 74.3 | 79.2 | 1256 | `20260929-102401_spider-dev_base_9b_local_n1034` |
-| 2026-09-29 | spider dev | 200/1034 | `qwen3.5:4b` | Q4_K_M | off | 0 | **72.0** | 72.0 | 76.0 | 830 | `20260929-103921_spider-dev_base_4b_local_n200` |
-| 2026-09-29 | spider dev | 1034/1034 | `qwen3.5:4b` | Q4_K_M | off | 0 | **73.4** | 73.4 | 77.5 | 810 | `20260929-104302_spider-dev_base_4b_local_n1034` |
+| 2026-09-27 | spider dev | 200/1034 | `qwen3.5:9B` | Q4_K_M | off | 0 | **75.0** | 75.0 | – | 1172† | `20260927-195159_spider-dev_base_9b_local_n200` |
+| 2026-09-29 | spider dev | 1034/1034 | `qwen3.5:9B` | Q4_K_M | off | 0 | **74.3** | 74.3 | 79.2 | 1256† | `20260929-102401_spider-dev_base_9b_local_n1034` |
+| 2026-09-29 | spider dev | 200/1034 | `qwen3.5:4b` | Q4_K_M | off | 0 | **72.0** | 72.0 | 76.0 | 830† | `20260929-103921_spider-dev_base_4b_local_n200` |
+| 2026-09-29 | spider dev | 1034/1034 | `qwen3.5:4b` | Q4_K_M | off | 0 | **73.4** | 73.4 | 77.5 | 810† | `20260929-104302_spider-dev_base_4b_local_n1034` |
 
 ## Harness sanity check: gold SQL scored as the prediction
 

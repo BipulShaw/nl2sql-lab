@@ -5,9 +5,10 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from nl2sql.execute.sqlite_exec import MAX_ROWS
+from nl2sql.linking.embed import EMBED_MODEL, EMBED_REVISION
 
 
 class Strict(BaseModel):
@@ -31,15 +32,23 @@ class DecodingConfig(Strict):
 
 
 class LinkingConfig(Strict):
-    enabled: Literal[False] = False  # schema linking arrives in Phase 2
+    enabled: bool = False
+    top_k: int = Field(4, ge=1)
+    all_tables_up_to: int = 6  # a database with at most this many tables keeps them all
+    fk_hops: int = Field(1, ge=0)  # add the foreign-key neighbors of the top k, this many hops out
+    lexical_bonus: float = Field(0.1, ge=0)  # added to a table the question names; chosen on Spider train
+    query_instruction: bool = True  # bge's retrieval prefix on the question
+    embed_model: str = EMBED_MODEL
+    embed_revision: str = EMBED_REVISION
 
 
 class RepairConfig(Strict):
-    max_repairs: Literal[0] = 0  # the repair loop arrives in Phase 2
+    max_repairs: int = Field(0, ge=0, le=5)
+    on_empty_result: Literal[False] = False  # BIRD gold can be empty; off unless measured (PLAN §6.7)
 
 
 class GuardConfig(Strict):
-    enabled: Literal[False] = False  # the sqlglot guard arrives in Phase 2
+    enabled: bool = False
     dialect: Literal["sqlite"] = "sqlite"
     inject_limit: Literal[False] = False  # never in eval: a LIMIT changes the answer
 

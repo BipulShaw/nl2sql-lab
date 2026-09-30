@@ -238,3 +238,75 @@ Written as interview prep, so each number is either measured on this machine or 
 - What it changes: Spider dev can't tell these two models apart, so it can't show a fine-tune closing the gap
   either. Phase 3's comparison rests on BIRD, and each model comparison reports the paired p-value.
 - **Where:** `src/nl2sql/eval/paired.py`; `uv run nl2sql results compare <run A> <run B>`.
+
+## Phase 2
+
+### Schema linking is retrieval: bi-encoders and recall
+- **The problem:** BIRD's schemas run to 7,600 tokens with descriptions and samples, and the training prompt is
+  2,048. Something has to decide what the model sees, before the model sees anything.
+- **A bi-encoder** turns each text into one vector, independently. The docs (a table's name and columns, a
+  column's name, description and sample values) are embedded once per database and cached. Each question costs
+  one more encoding and a matrix product. Scoring is a dot product, because the vectors are normalized. A
+  **cross-encoder** would read question and doc together and score more accurately, but it would run once per
+  table per question. That's the plan's future work.
+- **Asymmetric retrieval:** bge was trained with an instruction prefix on queries ("Represent this sentence for
+  searching relevant passages: ") and none on passages. Here it moved Spider train recall by at most half a
+  point, but it's how the model is meant to be used.
+- **Recall, not precision, is the metric.** A table the linker keeps but the query doesn't need costs tokens. A
+  table it drops that the query needs makes the question unanswerable. So link recall is the share of questions
+  whose kept tables include every table the gold query reads.
+  - The gold tables come from parsing the gold SQL with the guard's own name resolver.
+  - With k=4 plus foreign-key neighbors, recall is 100% on Spider dev and 99.7% on BIRD dev.
+- **The foreign-key hop is most of the recall.** Without it (the top 4 alone), BIRD dev recall on big databases
+  is 87%; with it, 99.5%. Join
+  tables (`singer_in_concert`) rarely look like the question, but they sit next to the tables that do. The price:
+  on BIRD the linker keeps 8.3 of 9.1 tables, so linking alone doesn't shrink prompts.
+- **Where:** `src/nl2sql/linking/`; `uv run nl2sql link-recall --dataset bird --split dev`.
+
+### Tuning without touching the test set
+- Every choice made by looking at a score overfits to the data that produced the score. Tune on dev and dev
+  numbers stop being an honest estimate.
+- The linker's knobs (lexical bonus, query instruction) were chosen on **Spider train**: 3,916 questions on
+  databases with more than 6 tables. Dev recall was only read afterwards, and k stayed at the plan's value
+  because dev met the target, as the plan prescribes.
+- The grid still printed dev recall next to train. That's fine as long as the choice is written down before
+  looking at dev, and the ADR says which set chose what (ADR-017).
+
+### What to cut when the prompt doesn't fit
+- The serializer has an ordered list of ever-smaller renderings, and the first one under budget wins.
+- The plan's order stripped samples and descriptions from every table before touching the ones the linker didn't
+  pick. On Spider that made linking a no-op: the prompt came out identical to the full schema. It also removed
+  detail from exactly the tables that matter.
+- The new order drops unselected tables first, then strips the selected ones (ADR-017). That kept more of the
+  gold columns' samples (Spider, 83% → 92%) and descriptions (BIRD, 62% → 65%). The cost was 2 of 500 BIRD
+  questions that lost a gold column because the linker missed its table.
+- Even the selected tables alone didn't fit for 10% of BIRD mini-dev. **Column pruning** keeps each selected
+  table's keys, then as many of its other columns as fit, best linker score first. Tokens only grow as columns
+  are added, so a binary search finds the largest set in about 7 tokenizer calls.
+- Result: every linked prompt in the three dev sets fits 2,048 tokens, and 99.2–100% keep every gold column.
+- **Where:** `src/nl2sql/schema/serialize.py`.
+
+### Scopes: why "which table is this column from?" is hard
+- `SELECT name FROM stadium WHERE stadium_id IN (SELECT stadium_id FROM concert WHERE year = 2014)`. The inner
+  query can see its own tables and, if it's correlated, the outer query's. So an unqualified `year` could
+  belong to `concert` or to `stadium`.
+- SQLite resolves a name from the innermost query outwards. sqlglot's scope analysis doesn't pick for you: it
+  lists `year` under the inner query and, as a possible correlated reference, under the outer one too.
+- The first guard checked every listing and blocked this valid query, because `stadium` has no `year`. The fix:
+  resolve each column once, from the deepest scope that contains it, walking outwards (ADR-016).
+- The test that proves the guard right is **agreement with SQLite**. On 11,727 gold queries and 2,068 model
+  queries, nothing the guard blocked would have run.
+- **Where:** `src/nl2sql/guard/sql_guard.py`; `tests/test_guard.py`.
+
+### Self-repair: execution feedback as a second turn
+- When a query fails, the pipeline sends a repair turn with the model's own reply and the error:
+  `The query failed: no such column: T1.nme. Fix it and return only the corrected SQL.` This is at most 2 times.
+- **It can only fix queries that fail.** A query that runs and returns the wrong rows looks like success to the
+  pipeline, which never sees gold. So repair's ceiling is the first answers' failure rate (1–2% of Spider dev in
+  Phase 1), not the whole error rate.
+- **Multi-turn prompts have to be counted too.** The client asserts that its token count equals the server's on
+  every call (ADR-012). A conversation with an assistant turn runs through parts of the chat template that
+  single-turn prompts never reach. So the counts were checked again on 24 conversations per model, with the
+  assistant turn in four forms (one containing a `<think>` block), and they matched exactly.
+- **Where:** `src/nl2sql/pipeline/runner.py`; the metrics `repair_rate`, `repair_success_rate` and
+  `repaired_correct` in every manifest.

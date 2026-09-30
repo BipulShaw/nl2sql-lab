@@ -19,7 +19,18 @@ prediction's columns in another order, as Spider's official evaluator does; it s
 column rule costs. Neither official evaluator computes exactly EX: BIRD's compares sets of rows (ADR-013
 in `docs/DECISIONS.md`). If `n` is smaller than the split, the run used a stratified sample (`--limit`,
 seed in the manifest).
+
+**p50 ms** is the median time per question from linking through executing the final query, repairs
+included; a reply served from the response cache counts at its original generation time. Values marked †
+come from Phase 1 manifests, which timed the model call alone.
 """
+
+
+ABLATION_NOTE = """**Link recall**: share of questions whose linked tables include every table the gold query
+reads. **Guard blocks**: share of first answers the guard stopped before execution. **Repair rate**: share of
+questions that needed at least one repair turn; **repair success**: share of those that ended on a query
+that ran (right or wrong); **won by repair**: repaired questions scored correct, each one a point the
+first answer lost, since that answer could not run."""
 
 
 def load_manifests(runs_dir: Path = RUNS_DIR) -> list[dict]:
@@ -29,6 +40,13 @@ def load_manifests(runs_dir: Path = RUNS_DIR) -> list[dict]:
 
 def pct(value: float | None) -> str:
     return "–" if value is None else f"{100 * value:.1f}"
+
+
+def latency(m: dict) -> str:
+    p50 = m["metrics"]["p50_latency_ms"]
+    if p50 is None:
+        return "–"
+    return f"{p50:.0f}" + ("" if m.get("latency_scope") == "pipeline" else "†")
 
 
 def model_row(m: dict) -> str:
@@ -45,10 +63,59 @@ def model_row(m: dict) -> str:
         f"**{pct(metrics['ex'])}**",
         pct(metrics["ex_valid_gold"]),
         pct(metrics.get("ex_any_column_order")),  # added after the first runs; missing from their manifests
-        f"{metrics['p50_latency_ms']:.0f}" if metrics["p50_latency_ms"] is not None else "–",
+        latency(m),
         f"`{m['run_id']}`",
     ]
     return "| " + " | ".join(cells) + " |"
+
+
+def ablation_row(m: dict) -> str:
+    config, metrics = m["config"], m["metrics"]
+    cells = [
+        f"`{m['config_name']}`",
+        f"`{m['model']}`",
+        "linked" if config["linking"]["enabled"] else "full",
+        "on" if config["guard"].get("enabled") else "off",  # Phase 1 configs had no guard switch
+        str(config["repair"]["max_repairs"]),
+        f"**{pct(metrics['ex'])}**",
+        pct(metrics["ex_valid_gold"]),
+        pct(metrics["link_recall"]),
+        pct(metrics["guard_block_rate"]),
+        pct(metrics["repair_rate"]),
+        pct(metrics["repair_success_rate"]),
+        str(m["counts"].get("repaired_correct", "–")),
+        latency(m),
+        f"`{m['run_id']}`",
+    ]
+    return "| " + " | ".join(cells) + " |"
+
+
+def ablation(model_runs: list[dict]) -> list[str]:
+    """Per split, the latest full-split run of each config: the pipeline ablation of PLAN §9."""
+    latest: dict[tuple[str, str], dict[str, dict]] = {}
+    for m in model_runs:  # sorted by start time, so a later run replaces an earlier one
+        if m["n"] == m["n_split"]:
+            latest.setdefault((m["dataset"], m["split"]), {})[m["config_name"]] = m
+    lines = ["## Pipeline ablation (PLAN §9)", "", ABLATION_NOTE]
+    for (dataset, split), runs in sorted(latest.items()):
+        rows = sorted(
+            runs.values(),
+            key=lambda m: (
+                m["model"],
+                m["config"]["linking"]["enabled"],
+                m["config"]["repair"]["max_repairs"],
+            ),
+        )
+        lines += [
+            "",
+            f"### {dataset} {split}",
+            "",
+            "| Config | Model | Schema | Guard | Repairs | EX | EX (valid gold) | Link recall | Guard blocks "
+            "| Repair rate | Repair success | Won by repair | p50 ms | Run |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+            *map(ablation_row, rows),
+        ]
+    return lines
 
 
 def gold_row(m: dict) -> str:
@@ -67,7 +134,7 @@ def gold_row(m: dict) -> str:
 def render(manifests: list[dict]) -> str:
     model_runs = [m for m in manifests if m["mode"] == "model"]
     gold_runs = [m for m in manifests if m["mode"] == "gold_passthrough"]
-    lines = [HEADER, "## Model runs", ""]
+    lines = [HEADER, *ablation(model_runs), "", "## All model runs", ""]
     lines += [
         "| Date | Data | n | Model | Quant | Linking | Repairs | EX | EX (valid gold) | EX (any col. order) "
         "| p50 ms | Run |",

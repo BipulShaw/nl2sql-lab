@@ -25,7 +25,8 @@ def base() -> dict:
     [
         {"thinking": True},
         {"guard": {"inject_limit": True}},
-        {"linking": {"enabled": True}},  # not implemented yet: must not be silently ignored
+        {"repair": {"max_repairs": 2, "on_empty_result": True}},  # not implemented: must not be ignored
+        {"linking": {"enabled": True, "top_k": 0}},
         {"prompt": {"schema_token_budget": 3072, "max_total_tokens": 9000}},  # over the context window
         {"unknown_key": 1},
     ],

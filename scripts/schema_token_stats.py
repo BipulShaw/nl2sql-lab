@@ -17,7 +17,7 @@ from nl2sql.data import load_examples
 from nl2sql.llm.tokens import ChatTokenizer
 from nl2sql.prompting.builder import build_messages
 from nl2sql.schema.introspect import load_schema
-from nl2sql.schema.serialize import LEVELS, render, serialize_schema
+from nl2sql.schema.serialize import FULL_SCHEMA_LEVELS, render, serialize_schema
 
 SPLITS = [("spider", "dev"), ("bird", "dev"), ("bird-mini", "dev")]
 LIMITS = (2048, 4096, 8192)
@@ -36,14 +36,14 @@ def main() -> None:
         examples = load_examples(dataset, split)
         schemas = {e.db_path: load_schema(e.db_path, e.db_id) for e in examples}
         print(f"\n{dataset}-{split}: {len(schemas)} databases, {len(examples)} examples")
-        for level in LEVELS[:3]:
+        for level in FULL_SCHEMA_LEVELS:
             counts = {
                 path.parent.name: tokenizer.count(render(s, {t.name.lower() for t in s.tables}, level))
                 for path, s in schemas.items()
             }
             largest = sorted(counts.items(), key=lambda kv: -kv[1])[:3]
             print(
-                f"  schema at {level:<15} median {statistics.median(counts.values()):>6.0f}"
+                f"  schema at {level.name:<15} median {statistics.median(counts.values()):>6.0f}"
                 f"  max {max(counts.values()):>6}  largest: {', '.join(f'{k} {v}' for k, v in largest)}"
             )
         for budget in args.budgets:

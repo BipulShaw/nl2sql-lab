@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from nl2sql.schema.introspect import introspect_sqlite, load_schema
-from nl2sql.schema.serialize import serialize_schema
+from nl2sql.schema.serialize import LINKED_LEVELS, render, serialize_schema
 
 
 def count_words(text: str) -> int:
@@ -88,17 +88,15 @@ def test_without_a_linker_every_table_is_kept_even_over_budget(db: Path) -> None
     assert result.text.count("CREATE TABLE") == 4
 
 
+SELECTED = ["Singer", "singer_in_concert"]
+
+
 def test_linker_selected_tables_are_never_dropped(db: Path) -> None:
     schema = introspect_sqlite(db, "concert")
-    selected = ["Singer", "singer_in_concert"]
-    no_samples = serialize_schema(
-        schema, count_words, token_budget=10_000, tables=selected, include_samples=False
-    )
+    no_samples = serialize_schema(schema, count_words, 10_000, tables=SELECTED, include_samples=False)
 
-    keys_only = serialize_schema(
-        schema, count_words, no_samples.tokens - 1, tables=selected, include_samples=False
-    )
-    smallest = serialize_schema(schema, count_words, token_budget=1, tables=selected)
+    keys_only = serialize_schema(schema, count_words, no_samples.tokens - 1, SELECTED, include_samples=False)
+    smallest = serialize_schema(schema, count_words, token_budget=1, tables=SELECTED)
 
     assert keys_only.level == "keys_only_unselected"
     assert (
@@ -106,6 +104,32 @@ def test_linker_selected_tables_are_never_dropped(db: Path) -> None:
     )  # only unselected tables shrink
     assert smallest.level == "over_budget"
     assert smallest.text.count("CREATE TABLE") == 2 and "TABLE singer (" in smallest.text
+
+
+def test_unselected_tables_go_before_selected_ones_lose_samples(db: Path) -> None:
+    schema = introspect_sqlite(db, "concert")
+    keys_only = serialize_schema(schema, count_words, 10_000, tables=SELECTED, include_samples=False)
+    full = serialize_schema(schema, count_words, 10_000, tables=SELECTED)
+
+    result = serialize_schema(schema, count_words, full.tokens - 1, tables=SELECTED)
+
+    assert keys_only.tokens < full.tokens
+    assert result.level in ("keys_only_unselected", "selected_only")
+    assert "'Joe Sharp'" in result.text and "capacity" not in result.text
+
+
+def test_columns_are_pruned_by_linker_score_when_nothing_else_fits(db: Path) -> None:
+    schema = introspect_sqlite(db, "concert")
+    smallest_level = count_words(render(schema, {"singer"}, LINKED_LEVELS[-1]))
+    scores = {("singer", "Home Town"): 0.9, ("singer", "name"): 0.5, ("singer", "order"): 0.1}
+
+    result = serialize_schema(
+        schema, count_words, smallest_level - 2, tables=["singer"], column_scores=scores
+    )
+
+    assert result.level == "pruned_columns" and result.tokens <= smallest_level - 2
+    assert "singer_id INTEGER PRIMARY KEY" in result.text  # keys always stay
+    assert "`Home Town`" in result.text and "notes" not in result.text
 
 
 def test_bird_descriptions_are_merged(db: Path) -> None:

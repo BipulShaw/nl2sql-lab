@@ -1,8 +1,9 @@
-"""Render a `Schema` as DDL-style prompt text, shrinking it to a token budget in a fixed order (PLAN §6.1)."""
+"""Render a `Schema` as DDL-style prompt text, shrinking it to a token budget in a fixed order (PLAN §6.1,
+ADR-015, ADR-017)."""
 
 import re
-from collections.abc import Callable, Collection
-from dataclasses import dataclass
+from collections.abc import Callable, Collection, Mapping
+from dataclasses import dataclass, replace
 
 from nl2sql.schema.model import Column, ForeignKey, Schema, Table
 
@@ -18,16 +19,40 @@ RESERVED = frozenset(
     "where with".split()
 )
 
-# Each level sheds more than the one before; the first that fits the budget wins. The last two only touch
-# tables the linker did not select, so without a linker (every table kept) the list stops at no_descriptions.
-LEVELS = ("full", "no_samples", "no_descriptions", "keys_only_unselected", "selected_only")
+
+@dataclass(frozen=True)
+class Level:
+    name: str
+    samples: bool
+    descriptions: bool
+    unselected: (
+        str  # how tables the linker did not select appear: "full", "keys" (key columns only), "hidden"
+    )
+
+
+# Each level sheds more than the one before; the first that fits the budget wins. Without a linker every table
+# is kept, so only detail can go.
+FULL_SCHEMA_LEVELS = (
+    Level("full", True, True, "full"),
+    Level("no_samples", False, True, "full"),
+    Level("no_descriptions", False, False, "full"),
+)
+# With a linker, unselected tables shrink and go first, then the selected ones lose detail (ADR-017).
+LINKED_LEVELS = (
+    Level("full", True, True, "full"),
+    Level("keys_only_unselected", True, True, "keys"),
+    Level("selected_only", True, True, "hidden"),
+    Level("selected_no_samples", False, True, "hidden"),
+    Level("selected_no_descriptions", False, False, "hidden"),
+)
+PRUNED = "pruned_columns"  # past the last linked level: the selected tables' lowest-scored columns go
 
 
 @dataclass(frozen=True)
 class SerializedSchema:
     text: str
     tokens: int
-    level: str  # the LEVELS entry that fit, or "over_budget" if even the smallest one did not
+    level: str  # the Level that fit, PRUNED, or "over_budget" if nothing did
 
 
 def quote(name: str) -> str:
@@ -52,17 +77,25 @@ def column_comment(column: Column, samples: bool, descriptions: bool) -> str:
     return " | ".join(parts)
 
 
+def key_columns(table: Table, foreign_keys: list[ForeignKey]) -> set[str]:
+    keys = {c.name for c in table.primary_key}
+    keys |= {fk.from_column for fk in foreign_keys if fk.from_table == table.name}
+    return keys | {fk.to_column for fk in foreign_keys if fk.to_table == table.name}
+
+
 def render_table(
-    table: Table, foreign_keys: list[ForeignKey], samples: bool, descriptions: bool, keys_only: bool
+    table: Table,
+    foreign_keys: list[ForeignKey],
+    samples: bool,
+    descriptions: bool,
+    columns: set[str] | None = None,
 ) -> str:
-    key_columns = {c.name for c in table.primary_key}
-    key_columns |= {fk.from_column for fk in foreign_keys if fk.from_table == table.name}
-    key_columns |= {fk.to_column for fk in foreign_keys if fk.to_table == table.name}
+    """`columns`: the only columns to show, by name; None shows them all."""
     composite_pk = len(table.primary_key) > 1
 
     body: list[tuple[str, str]] = []  # (definition, comment)
     for column in table.columns:
-        if keys_only and column.name not in key_columns:
+        if columns is not None and column.name not in columns:
             continue
         definition = f"{quote(column.name)} {column.type}".rstrip()
         if column.is_pk and not composite_pk:
@@ -85,21 +118,58 @@ def render_table(
     return "\n".join([f"CREATE TABLE {quote(table.name)} (", *lines, ");", *fk_lines])
 
 
-def render(schema: Schema, selected: set[str], level: str) -> str:
-    rank = LEVELS.index(level)
-    shown = [t for t in schema.tables if rank < LEVELS.index("selected_only") or t.name.lower() in selected]
+def render(schema: Schema, selected: set[str], level: Level, kept: set[tuple[str, str]] | None = None) -> str:
+    """`selected`: lower-cased table names. `kept`: if given, the only lower-cased (table, column) pairs that
+    selected tables show besides their keys."""
+    shown = [t for t in schema.tables if level.unselected != "hidden" or t.name.lower() in selected]
     names = {t.name for t in shown}
     foreign_keys = [fk for fk in schema.foreign_keys if fk.from_table in names and fk.to_table in names]
-    return "\n\n".join(
-        render_table(
-            table,
-            foreign_keys,
-            samples=rank < LEVELS.index("no_samples"),
-            descriptions=rank < LEVELS.index("no_descriptions"),
-            keys_only=rank >= LEVELS.index("keys_only_unselected") and table.name.lower() not in selected,
-        )
-        for table in shown
-    )
+    parts = []
+    for table in shown:
+        columns = None
+        if table.name.lower() not in selected:
+            columns = key_columns(table, foreign_keys) if level.unselected == "keys" else None
+        elif kept is not None:
+            columns = key_columns(table, foreign_keys)
+            columns |= {c.name for c in table.columns if (table.name.lower(), c.name.lower()) in kept}
+        parts.append(render_table(table, foreign_keys, level.samples, level.descriptions, columns))
+    return "\n\n".join(parts)
+
+
+def prune_columns(
+    schema: Schema,
+    selected: set[str],
+    level: Level,
+    count_tokens: Callable[[str], int],
+    token_budget: int,
+    column_scores: Mapping[tuple[str, str], float],
+) -> SerializedSchema:
+    """The selected tables with as many of their best-scored columns as fit (PLAN §6.2); keys always stay."""
+    scores = {(t.lower(), c.lower()): s for (t, c), s in column_scores.items()}
+    ranked = [
+        (t.name.lower(), c.name.lower())
+        for t in schema.tables
+        if t.name.lower() in selected
+        for c in t.columns
+    ]
+    ranked.sort(key=lambda column: -scores.get(column, -1.0))  # stable: ties keep schema order
+
+    def keep(n: int) -> SerializedSchema:
+        text = render(schema, selected, level, kept=set(ranked[:n]))
+        return SerializedSchema(text, count_tokens(text), PRUNED)
+
+    best = keep(0)
+    if best.tokens > token_budget:
+        return replace(best, level="over_budget")
+    fits, too_many = 0, len(ranked)  # keeping every column is the level that already failed
+    while too_many - fits > 1:  # binary search: tokens only grow with each column kept
+        middle = (fits + too_many) // 2
+        candidate = keep(middle)
+        if candidate.tokens <= token_budget:
+            fits, best = middle, candidate
+        else:
+            too_many = middle
+    return best
 
 
 def serialize_schema(
@@ -108,18 +178,25 @@ def serialize_schema(
     token_budget: int = 1536,
     tables: Collection[str] | None = None,
     include_samples: bool = True,
+    column_scores: Mapping[tuple[str, str], float] | None = None,
 ) -> SerializedSchema:
-    """`tables` are the linker's picks and are never dropped. With `tables=None` (no linker) every table is
-    kept, so only sample values and descriptions can be shed and the result may stay over budget."""
+    """`tables` are the linker's picks and are never dropped; `column_scores` (linker similarity per
+    (table, column)) lets their columns be pruned as a last resort. With `tables=None` (no linker) every table
+    is kept, so only sample values and descriptions can be shed and the result may stay over budget."""
     if tables is None:
-        selected, levels = {t.name.lower() for t in schema.tables}, LEVELS[:3]
+        selected, levels = {t.name.lower() for t in schema.tables}, FULL_SCHEMA_LEVELS
     else:
-        selected, levels = {t.lower() for t in tables}, LEVELS
+        selected, levels = {t.lower() for t in tables}, LINKED_LEVELS
     if not include_samples:
-        levels = levels[1:]
+        without: dict[tuple[bool, str], Level] = {}
+        for level in levels:  # levels that now show the same thing merge; the later name says what went
+            without[(level.descriptions, level.unselected)] = replace(level, samples=False)
+        levels = tuple(without.values())
     for level in levels:
         text = render(schema, selected, level)
         tokens = count_tokens(text)
         if tokens <= token_budget:
-            return SerializedSchema(text, tokens, level)
+            return SerializedSchema(text, tokens, level.name)
+    if tables is not None and column_scores is not None:
+        return prune_columns(schema, selected, level, count_tokens, token_budget, column_scores)
     return SerializedSchema(text, tokens, "over_budget")

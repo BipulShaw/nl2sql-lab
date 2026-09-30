@@ -464,3 +464,215 @@ native `/api/chat`, thinking off, `num_ctx` 8192):
 - The Spider baseline sees every schema complete.
 - On BIRD, 5 of 11 databases lose samples or descriptions at this budget. At the 1,536 training budget, BIRD needs
   schema linking.
+
+## ADR-016 — The SQL guard checks names against the whole database, and resolves each column once
+*2026-09-29, Phase 2*
+
+**Context.**
+- The guard (PLAN §6.5) runs before execution. It allows exactly one read-only query and blocks one that names a
+  table or column that doesn't exist. A block's message goes into the repair prompt.
+- With linking, the prompt shows only some tables. The guard could check names against the prompt or against the
+  database.
+- sqlglot's scope analysis lists a subquery's unqualified columns under the query around it as well, since they
+  might be correlated references. The first version resolved each column in every scope that listed it. It
+  blocked valid queries: `SELECT name FROM stadium WHERE stadium_id IN (SELECT stadium_id FROM concert WHERE
+  year = 2014)` was blocked because `year` isn't a column of `stadium`.
+
+**Decision.**
+- **Names are checked against the whole database.** A query that would run is never blocked because the linker
+  left a table out. Using a table the prompt didn't show isn't an error: the model may know it from the question.
+- **Each column is resolved once, from the innermost query that contains it,** and from there outwards through
+  the enclosing queries, as SQLite does. Result aliases, CTEs, derived tables, `rowid`, and double-quoted strings
+  that match no column follow SQLite's rules.
+- Rules, in order:
+  1. The SQL parses as one statement.
+  2. That statement is a query (a SELECT, or a set operation such as UNION, with or without WITH).
+  3. Nothing in it writes (INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, PRAGMA, ATTACH, DETACH, `SELECT ... INTO`).
+  4. Every table and column exists.
+- A block carries a machine-readable reason (`unknown_column:T1.nme`) and a message in SQLite's own words
+  (`no such column: T1.nme`).
+- The guard doesn't try to catch everything that fails at execution. Ambiguous column names, aggregate misuse and
+  wrong argument counts are left to SQLite, whose error message drives the repair just as well.
+- `inject_limit` stays `false`: an injected LIMIT changes the answer, so eval never adds one.
+
+**Evidence.**
+- **Gold SQL blocked (must be 0):**
+  - Spider dev 0 of 1,034; BIRD dev 0 of 1,534; BIRD mini-dev 0 of 500.
+  - Spider train 1 of 8,659: example 3153, whose gold names a table that doesn't exist (ADR-014).
+- **Phase 1 predictions on Spider dev** (1,034 each), guard verdict vs what SQLite did:
+
+  | | allowed, ran | allowed, failed | blocked, failed | blocked, would have run |
+  |---|---|---|---|---|
+  | 9B | 1,024 | 0 | 10 | 0 |
+  | 4B | 1,013 | 3 | 18 | 0 |
+
+  The 4B's three that got past the guard failed with an ambiguous column, a misused aggregate and a wrong
+  argument count.
+- `tests/test_guard.py`: 45 cases, and every case the guard allows also runs in SQLite.
+
+**Consequence.**
+- The guard makes no false blocks on any gold query or Phase 1 prediction. Its value is an early, exact error
+  message, not extra accuracy: without repair it can't change EX. So it is on only in the repair configs.
+
+## ADR-017 — Schema linking: bge-small, top 4 plus foreign-key neighbors, and what to cut when the budget binds
+*2026-09-30, Phase 2; amends PLAN §6.1 and ADR-015 (the shedding order with a linker)*
+
+**Context.**
+- PLAN §6.2 specifies:
+  - One doc per table and one per column.
+  - The query is the question plus BIRD's evidence.
+  - A table's score is max(table-doc similarity, best column similarity), plus a small bonus when the
+    question names it.
+  - Keep every table of a database with at most 6; otherwise keep the top k=4 and their one-hop foreign-key
+    neighbors.
+  - Target at least 95% link recall on both dev sets, and tune k only if below.
+- The linked configs use the training budget: a 1,536-token schema in a 2,048-token prompt, including the 256-token
+  reply. `scripts/schema_token_stats.py` showed BIRD's full schemas don't fit (ADR-015).
+- PLAN §6.1's order for linked prompts: drop samples, then descriptions (from every table), then reduce unselected
+  tables to their keys, then drop them.
+
+**Decision.**
+- **Embedder:** `BAAI/bge-small-en-v1.5` at a pinned revision, via sentence-transformers on the CPU.
+  - Vectors are normalized, so similarity is a dot product.
+  - The question gets bge's retrieval instruction ("Represent this sentence for searching relevant passages: ");
+    the docs don't.
+  - Docs spell names as words: `setCode` becomes `set code`, `singer_in_concert` becomes `singer in concert`.
+  - A table doc is its name and column names. A column doc is the table and column name, BIRD's description and
+    the sample values.
+  - Doc vectors are cached per database, keyed by a hash of the docs.
+- **Selection:** `top_k: 4`, `fk_hops: 1`, `all_tables_up_to: 6`, `lexical_bonus: 0.1`. A table is "named" when
+  every word of its name, with a plural `s` removed, appears in the question or evidence.
+- **Tuning happened on Spider train, never on a dev set.** The bonus (0, 0.05, 0.1) and the instruction (on, off)
+  were chosen by recall on Spider train's 3,916 questions on databases with more than 6 tables. k and fk_hops
+  stayed at the plan's values because the dev recall target was met, as the plan prescribes.
+- **Shedding order for linked prompts (changed from PLAN §6.1):**
+  1. `full`
+  2. `keys_only_unselected`
+  3. `selected_only`
+  4. `selected_no_samples`
+  5. `selected_no_descriptions`
+  6. `pruned_columns`
+
+  Tables the linker didn't select shrink and go before the selected ones lose samples or descriptions.
+  `pruned_columns` is the plan's "top-N columns (keep PK/FK) if over budget": the selected tables keep their
+  key columns plus as many of their other columns as fit, best column similarity first. The largest number that
+  fits is found by binary search. Without a linker the order is unchanged: `full`, `no_samples`,
+  `no_descriptions`.
+
+**Evidence.**
+- **Link recall** (share of questions whose kept tables include every table the gold SQL reads). "Big" means
+  databases with more than 6 tables; smaller ones keep every table.
+
+  | k=4, fk_hops=1 | Spider train (big) | Spider dev | BIRD dev | BIRD mini-dev |
+  |---|---|---|---|---|
+  | instruction, bonus 0 | 93.8% | 100% | 98.8% big, 99.3% all | 99.0% big, 99.4% all |
+  | instruction, bonus 0.05 | 94.2% | 100% | 99.1% big | 99.3% big |
+  | **instruction, bonus 0.1** | **94.3%** | **100%** | **99.5% big, 99.7% all** | **99.7% big, 99.8% all** |
+  | no instruction, bonus 0.1 | 94.4% | 100% | 99.4% big | 99.7% big |
+
+  - Without foreign-key hops (k=4), recall on BIRD dev's big databases is 76.6–87.1%. The hops matter.
+  - The bonus helps most there: 75.7% → 77.5% on Spider train and 79.6% → 87.1% on BIRD dev (big).
+  - At k=4, the instruction changes Spider train recall by at most 0.5 points either way. It stays on
+    because it's how bge is meant to be queried.
+- **The cost of the hops** (`nl2sql link-recall`): on databases with more than 6 tables, the linker keeps 8.26
+  of 9.13 tables on average in BIRD dev, 8.4 of 9.29 in BIRD mini-dev, and 6.78 of 9.46 in Spider dev. So
+  linking doesn't make BIRD prompts small on its own. What it adds is knowing which tables matter when something
+  has to be cut.
+- **Shedding order**, measured at budget 1,536 with k=4 and fk_hops=1 (bonus 0.05, before the bonus was chosen):
+
+  | | PLAN §6.1 order | unselected first |
+  |---|---|---|
+  | Spider dev: gold columns' samples in the prompt | 83.4% | 91.8% |
+  | BIRD mini-dev: gold columns' descriptions in the prompt | 61.7% | 64.8% |
+  | BIRD mini-dev: every gold column visible | 100% | 99.6% (2 questions) |
+  | BIRD mini-dev: over budget even at the last level | 10.2% | 10.2% |
+
+  With the plan's order, linking barely changes a prompt. On Spider it produces exactly the full-schema prompt
+  at the same budget.
+- **Final linked prompts** (`pruned_columns` included; prompt + 256 reply tokens):
+
+  | | over 2,048 | median | 95th pct | every gold column visible | levels |
+  |---|---|---|---|---|---|
+  | Spider dev | 0 | 904 | 1,701 | 100% | 874 full, 52 keys-only unselected, 35 selected only, 73 no samples |
+  | BIRD mini-dev | 0 | 1,503 | 1,932 | 99.2% | 122 full, 193 no samples, 134 no descriptions, 51 pruned |
+  | BIRD dev | 0 | 1,504 | 1,912 | 99.3% | 338 full, 1 keys-only unselected, 654 no samples, 412 no descriptions, 129 pruned |
+
+**Alternatives.**
+- Keep PLAN §6.1's order. It keeps unselected tables visible longest, which protects against linker misses. But
+  it strips samples and descriptions from the tables that matter first, and 10% of BIRD mini-dev still wouldn't
+  fit.
+- Tune k and the bonus on a dev set. The grid is cheap, but tuning on dev would make dev recall optimistic.
+- A cross-encoder reranker over the top tables. That's future work in the plan; recall is already above target.
+
+**Consequence.**
+- Every linked prompt fits the 2,048-token training length, the same length Phase 3 trains at.
+- Row B of the ablation (linking at 1,536/2,048 against full schema at 3,072/4,096) changes the budget as well as
+  the linking. That's deliberate: the linked configuration is the one that fits the training length, and the
+  results say so.
+
+## ADR-018 — Pipeline events, the repair loop, and what the harness records
+*2026-09-30, Phase 2*
+
+**Context.**
+- PLAN §6.7: on a guard failure, an execution error or a timeout, send a repair turn with the original messages,
+  the model's reply, and `The query failed: {reason}. Fix it and return only the corrected SQL.`
+  - At most 2 repairs.
+  - An empty result is not a trigger by default.
+- PLAN §6.8: the pipeline emits typed events, and the eval harness consumes the same events. The benchmark and
+  the demo then run one code path.
+- ADR-012 requires the client's token count to equal the server's on every call. Repair turns are multi-turn
+  chats, which Phase 1 never sent.
+
+**Decision.**
+- **`Pipeline.run` yields pydantic events:**
+  - `run_started`, `schema_linked`, `prompt_built`
+  - `sql_generated`, `guard_result`, `executed`, `repair_started`
+  - `run_finished` or `run_failed`
+
+  The harness builds each prediction record from them (`record_from_events`).
+- **Triggers:** a guard block, an execution error, a timeout, and a reply with no SQL. A reply with no SQL has
+  nothing for the guard to check, so it counts as a guard failure.
+- **The reason** is the guard's SQLite-worded message, or SQLite's own error text without the Python exception
+  class, or "it did not finish within 30 seconds".
+- **An empty result is not a trigger.** `on_empty_result` accepts only `false`, so a config can't claim it
+  (BIRD gold can be empty).
+- **The pipeline executes the model's query only to learn whether it fails,** fetching at most 10,000 rows
+  (PLAN §6.6). It never sees gold. The harness scores the final query separately, with ADR-013's rules.
+- **The scored prediction is the last SQL the model wrote,** even when the pipeline gave up on it. `failure`
+  records why: `guard_blocked`, `exec_error`, `timeout`, `no_sql` or `prompt_too_long`.
+- **Budgets:** `max_total_tokens` applies to the first turn, the training length. Repair turns may go past it.
+  The client still refuses any prompt the context window can't hold, and still requires the server's count to
+  match (ADR-012).
+- **Latency** is per question, end to end: linking through the last execution, repairs included. A reply served
+  from the response cache counts at its original generation time, so a rerun reports the same latency.
+  Manifests say `latency_scope: pipeline`. Phase 1 timed the model call alone, and `RESULTS.md` marks those
+  numbers.
+- **Metrics:**
+  - `guard_block_rate`: first answers blocked, over all questions.
+  - `repair_rate`: questions with at least one repair.
+  - `repair_success_rate`: repaired questions that ended on a query that ran.
+  - `link_recall`
+  - `repaired_correct`: repaired questions scored correct. Each is a point the first answer lost, since that
+    answer couldn't run.
+
+  Each metric is `null` when its stage is off.
+
+**Evidence.**
+- **Multi-turn token counts** (`system, user, assistant, user`) on 24 Spider dev conversations per model:
+  - The client's count equals Ollama's `prompt_eval_count` exactly, on both the 9B and the 4B, 24 of 24 each.
+  - The assistant turn was tried four ways: the raw reply, the reply with a trailing newline, the bare SQL, and
+    the reply wrapped in `<think>` tags.
+- `tests/test_pipeline.py` drives the pipeline with a scripted model:
+  - A guard block is repaired, and the second request is the first plus two turns.
+  - An execution error is repaired without the guard.
+  - A run gives up after `max_repairs` and keeps the last SQL.
+  - An over-budget prompt is never sent.
+  - Cached replies keep their latency.
+  - Events survive a JSON round trip.
+
+**Consequence.**
+- A repair can only turn a failed query into one that runs; it can't fix a query that runs and is wrong. Its
+  ceiling is the first answers' failure rate. In Phase 1 on Spider dev, 10 (9B) and 21 (4B) of 1,034 first
+  answers failed to run.
+- Results for the linked and repair configs record per-attempt detail (`attempts[]`) in `predictions.jsonl`,
+  so any failure can be traced to its turn.

@@ -33,6 +33,20 @@ uv run nl2sql results compare results/runs/<run_a> results/runs/<run_b>   # pair
 Each run writes `results/runs/<run_id>/manifest.json`: the config, the model digest, the git commit, the
 metrics and counts. Model replies are cached, so rerunning a run re-scores it without calling the model again.
 
+## Pipeline
+
+Every question goes link → serialize → prompt → generate → guard → execute. A query that is blocked or fails
+gets up to `repair.max_repairs` repair turns. `nl2sql.pipeline` yields a typed event at each step, and the eval
+harness records its predictions from those same events. Configs switch the stages on (`configs/linked_*.yaml`).
+
+```bash
+uv run --extra ml nl2sql link-recall --dataset bird --split dev [--k 4] [--fk-hops 1]   # linker recall on gold tables
+uv run --extra ml nl2sql eval --dataset bird-mini --split dev --config configs/linked_repair2_9b_local.yaml
+```
+
+Design notes: the guard in ADR-016, linking and budget cuts in ADR-017, the repair loop and its metrics in
+ADR-018.
+
 **About the numbers.** EX here is strict execution accuracy. Rows are compared as multisets, and as ordered
 lists when the gold query has a top-level `ORDER BY`; columns must come in the gold's order. That is not
 exactly what either official evaluator computes. BIRD's compares sets of rows. Spider's test-suite evaluator
